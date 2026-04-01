@@ -1,0 +1,38 @@
+name: Daily scraper
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "59 9 * * *"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Taipei
+      PHONE: ${{ secrets.PHONE }}
+      PASSWORD: ${{ secrets.PASSWORD }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Create .env
+        run: |
+          cat > .env <<'EOF'
+          PHONE=${PHONE}
+          PASSWORD=${PASSWORD}
+          TG_BOT_TOKEN=${TG_BOT_TOKEN}
+          TG_CHAT_ID=${TG_CHAT_ID}
+          EOF
+
+      - name: Run scraper
+        run: node scraper.js --tg-only
