@@ -36,7 +36,28 @@ jobs:
 
       - name: Debug secrets presence
         run: |
-          node -e "const fs=require('fs'); const envText=fs.readFileSync('.env','utf8'); const values=Object.fromEntries(envText.split(/\r?\n/).filter(Boolean).map((line)=>{ const idx=line.indexOf('='); return idx===-1 ? [line,''] : [line.slice(0,idx), line.slice(idx+1)]; })); const mask=(value)=>{ if(!value) return '(empty)'; if(value.length<=4) return '*'.repeat(value.length); return `${value.slice(0,2)}***${value.slice(-2)}`; }; for (const key of ['PHONE','PASSWORD','TG_BOT_TOKEN','TG_CHAT_ID']) { const value=values[key] || ''; console.log(`${key}: present=${value ? 'yes' : 'no'}, length=${value.length}, preview=${mask(value)}`); }"
+          node <<'NODE'
+          const fs = require('fs');
+          const envText = fs.readFileSync('.env', 'utf8');
+          const values = Object.fromEntries(
+            envText
+              .split(/\r?\n/)
+              .filter(Boolean)
+              .map((line) => {
+                const idx = line.indexOf('=');
+                return idx === -1 ? [line, ''] : [line.slice(0, idx), line.slice(idx + 1)];
+              }),
+          );
+          const mask = (value) => {
+            if (!value) return '(empty)';
+            if (value.length <= 4) return '*'.repeat(value.length);
+            return `${value.slice(0, 2)}***${value.slice(-2)}`;
+          };
+          for (const key of ['PHONE', 'PASSWORD', 'TG_BOT_TOKEN', 'TG_CHAT_ID']) {
+            const value = values[key] || '';
+            console.log(`${key}: present=${value ? 'yes' : 'no'}, length=${value.length}, preview=${mask(value)}`);
+          }
+          NODE
 
       - name: Run scraper
         run: node scraper.js --tg-only
