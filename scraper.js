@@ -31,6 +31,7 @@ function getHelpText() {
     "  --notice                 抓取後發送 Telegram 通知",
     "  --tg-only                只發送 Telegram，不寫入 ./data",
     "  --no-sign-missing        不自動簽名聯絡簿",
+    "  --wait                   等待至台北時間 18:00:01 再執行",
     "  --debug                  顯示額外偵錯資訊",
     "",
     "Medicine Files:",
@@ -68,6 +69,10 @@ function parseArgs(argv) {
     }
     if (value === "--no-sign-missing") {
       args.signMissing = false;
+      continue;
+    }
+    if (value === "--wait") {
+      args.wait = true;
       continue;
     }
     if (value === "--notice") {
@@ -1014,11 +1019,33 @@ function filterChildrenForMedicine(children, medicineTarget) {
   return children.filter((child) => child.name === targetName);
 }
 
+async function waitUntilTaipei1800() {
+  const now = new Date();
+  const taipeiDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now); // e.g. "2026-04-02"
+  // 18:00:01 Taipei (UTC+8) = 10:00:01 UTC
+  const target = new Date(`${taipeiDate}T10:00:01Z`);
+  if (now >= target) {
+    return;
+  }
+  const delay = target - now;
+  const seconds = Math.round(delay / 1000);
+  process.stderr.write(`等待至台北時間 18:00:01，剩餘約 ${seconds} 秒...\n`);
+  await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(`${getHelpText()}\n`);
     return;
+  }
+  if (args.wait) {
+    await waitUntilTaipei1800();
   }
   const { phone, password, telegramBotToken, telegramChatId } = await loadConfig();
   const dates = expandDates(args);
