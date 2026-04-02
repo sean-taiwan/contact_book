@@ -5,7 +5,8 @@ const API_BASE = "https://api.holdinghands.com.tw";
 const WEB_ORIGIN = "https://www.holdinghands.com.tw";
 const ROOT = __dirname;
 const ENV_PATH = path.join(ROOT, ".env");
-const DEFAULT_OUTPUT_DIR = path.join(ROOT, "data");
+const LAST_MSG_PATH = path.join(ROOT, ".last_msg_id");
+const DEFAULT_OUTPUT_DIR = path.join(ROOT, "Daily");
 const DEFAULT_MEDICINE_DIR = path.join(ROOT, "medicine");
 const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med"]);
 const MEDICINE_FILE_ALIASES = {
@@ -26,10 +27,11 @@ function getHelpText() {
     "  --date YYYY-MM-DD        指定單一天日期",
     "  --from YYYY-MM-DD        指定起始日期，需搭配 --to",
     "  --to YYYY-MM-DD          指定結束日期，需搭配 --from",
-    "  --output PATH            聯絡簿輸出目錄，預設為 ./data",
+    "  --output PATH            聯絡簿輸出目錄，預設為 ./Daily",
     "  --med 1|2                送出托藥單：1=于硯，2=于喬",
-    "  --notice                 抓取後發送 Telegram 通知",
-    "  --tg-only                只發送 Telegram，不寫入 ./data",
+    "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
+    "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
+    "  --auto_reply             擷取今日兩位孩子聯絡簿老師留言，請 Gemini 擬三段回覆後透過 Telegram 傳送",
     "  --no-sign-missing        不自動簽名聯絡簿",
     "  --wait                   等待至台北時間 18:00:01 再執行",
     "  --debug                  顯示額外偵錯資訊",
@@ -55,6 +57,8 @@ function parseArgs(argv) {
     sendTelegram: false,
     telegramOnly: false,
     signMissing: true,
+    fetchMessages: false,
+    autoReply: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -77,11 +81,15 @@ function parseArgs(argv) {
     }
     if (value === "--notice") {
       args.sendTelegram = true;
+      args.telegramOnly = true;
       continue;
     }
-    if (value === "--tg-only") {
-      args.sendTelegram = true;
-      args.telegramOnly = true;
+    if (value === "--msg") {
+      args.fetchMessages = true;
+      continue;
+    }
+    if (value === "--auto_reply") {
+      args.autoReply = true;
       continue;
     }
 
@@ -154,10 +162,22 @@ function dateToString(date) {
   return `${year}-${month}-${day}`;
 }
 
+function getTaipeiDateString(offsetDays = 0) {
+  const now = new Date();
+  const taipeiStr = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now); // "YYYY-MM-DD"
+  if (offsetDays === 0) return taipeiStr;
+  const d = new Date(`${taipeiStr}T00:00:00`);
+  d.setDate(d.getDate() + offsetDays);
+  return dateToString(d);
+}
+
 function getTomorrowString() {
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return dateToString(tomorrow);
+  return getTaipeiDateString(1);
 }
 
 function expandDates(args) {
@@ -190,7 +210,7 @@ function expandDates(args) {
     return dates;
   }
 
-  return [dateToString(new Date())];
+  return [getTaipeiDateString(0)];
 }
 
 async function loadConfig() {
@@ -206,7 +226,42 @@ async function loadConfig() {
     password,
     telegramBotToken: env.TG_BOT_TOKEN || "",
     telegramChatId: env.TG_CHAT_ID || "",
+    geminiApiKey: env.GEMINI_API_KEY || "",
+    lineAccessToken: env.LINE_ACCESS_TOKEN || "",
+    lineUserId: env.LINE_USER_ID || "",
   };
+}
+
+
+async function loadLastMsgMap() {
+  try {
+    const text = await fs.readFile(LAST_MSG_PATH, "utf8").then((t) => t.trim());
+    // Legacy format: plain number — discard, start per-room tracking fresh
+    if (/^\d+$/.test(text)) {
+      return {};
+    }
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    // Drop any leftover _global key
+    delete parsed._global;
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+async function saveLastMsgMap(map) {
+  await fs.writeFile(LAST_MSG_PATH, JSON.stringify(map), "utf8");
+}
+
+async function requestJsonSoft(url, options = {}) {
+  try {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return null;
+  }
 }
 
 async function requestJson(url, options = {}) {
@@ -391,6 +446,351 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
+async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption, authHeaders) {
+  // Download image with auth headers, then upload to Telegram as binary
+  const imgResponse = await fetch(imageUrl, { headers: authHeaders });
+  if (!imgResponse.ok) {
+    throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
+  }
+  const blob = await imgResponse.blob();
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("photo", blob, "photo.jpg");
+  if (caption) {
+    form.append("caption", caption);
+  }
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  });
+  const payload = await response.json();
+  if (!payload.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
+  }
+}
+
+async function sendLineMessage(accessToken, userId, text) {
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      to: userId,
+      messages: [{ type: "text", text }],
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`LINE send failed (${response.status}): ${body.slice(0, 200)}`);
+  }
+}
+
+function toLineText(document) {
+  const lines = [`${document.child_name} ${document.date} 聯絡簿`];
+
+  if (!document.exists) {
+    lines.push("今天沒有已發布的聯絡簿。");
+    return lines.join("\n");
+  }
+
+  if (document.teacher_message.batch || document.teacher_message.content) {
+    lines.push("");
+    lines.push("【老師的話】");
+    if (hasText(document.teacher_message.batch)) {
+      lines.push(stripComments(document.teacher_message.batch));
+    }
+    if (hasText(document.teacher_message.content)) {
+      lines.push(document.teacher_message.content);
+    }
+  }
+
+  const bringEntries = document.entries.filter(
+    (e) => e.receipt_required || /需備/.test(e.name || e.category || ""),
+  );
+  if (bringEntries.length > 0) {
+    lines.push("");
+    for (const entry of bringEntries) {
+      const label = entry.name || entry.type;
+      const value = entry.content || entry.values.join("、");
+      if (hasText(label) && hasText(value)) {
+        lines.push(`• ${label}：${value}`);
+      }
+    }
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+async function sendDocumentToLine(accessToken, userId, document) {
+  const text = toLineText(document);
+  await sendLineMessage(accessToken, userId, text);
+}
+
+const TELEGRAM_CAPTION_LIMIT = 1024;
+
+function truncateTelegramCaption(text) {
+  if (!text || text.length <= TELEGRAM_CAPTION_LIMIT) return text;
+  return `${text.slice(0, TELEGRAM_CAPTION_LIMIT - 1)}\u2026`;
+}
+
+function isImageContent(content) {
+  return /\.(jpg|jpeg|png|gif|webp)$/i.test(content);
+}
+
+const ASSET_BASE = "https://assn.holdinghands.com.tw:8084/master";
+
+function buildImageUrl(content, createTime) {
+  if (content.startsWith("http")) {
+    return content;
+  }
+  if (content.includes("/")) {
+    return `${ASSET_BASE}/${content}`;
+  }
+  // content is filename only — construct date path from create_time (e.g. "2026-04-02 16:31:59")
+  const yearMonth = String(createTime || "").slice(0, 7); // "2026-04"
+  return `${ASSET_BASE}/message/${yearMonth}/${content}`;
+}
+
+async function callGeminiText(apiKey, prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+  });
+  const json = await response.json();
+  if (json.error) {
+    throw new Error(`Gemini API 錯誤: ${json.error.message}`);
+  }
+  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    const reason = json.candidates?.[0]?.finishReason || "unknown";
+    throw new Error(`Gemini 回應無文字內容 (finishReason: ${reason})`);
+  }
+  return text;
+}
+
+async function processAutoReply({ token, children, date, telegramBotToken, telegramChatId, geminiApiKey, debug }) {
+  const sections = [];
+
+  for (const child of children) {
+    let books;
+    try {
+      const fetched = await fetchContactBooks(token, child.babyId, date, date);
+      books = fetched.payload.contact_books;
+    } catch (err) {
+      process.stderr.write(`auto_reply: 無法取得 ${child.name} 聯絡簿: ${err.message}\n`);
+      continue;
+    }
+
+    const book = books.find((b) => b.date === date);
+    const content = book?.teacher_message?.content ? stripComments(book.teacher_message.content).trim() : "";
+    if (!content) {
+      if (debug) process.stderr.write(`auto_reply: ${child.name} 今日無老師留言，略過。\n`);
+      continue;
+    }
+    sections.push(`【${child.name}的聯絡簿】\n${content}`);
+  }
+
+  if (sections.length === 0) {
+    await sendTelegramMessage(telegramBotToken, telegramChatId, "今日兩位孩子的聯絡簿均無老師留言。");
+    return;
+  }
+
+  const combinedNotes = sections.join("\n\n");
+  const prompt =
+    `你是一位溫柔且充滿感激的家長（家有兩歲雙胞胎）。以下是今日托嬰聯絡簿老師的留言，` +
+    `包含兩位孩子（于硯、于喬）的紀錄。請根據老師紀錄的細節，撰寫三段不同風格且自然的家長回覆` +
+    `（例如：感謝風格、成長觀察風格、簡潔溫馨風格）。每段回覆在 30-50 字內，可以同時提及兩位孩子。` +
+    `請直接輸出這三段回覆，中間用 '###' 隔開，不要提供任何序言、標題或額外解釋。\n\n${combinedNotes}`;
+
+  if (debug) process.stderr.write(`auto_reply: 傳送 prompt 給 Gemini...\n`);
+
+  const aiResponse = await callGeminiText(geminiApiKey, prompt);
+  const versions = aiResponse.split("###").map((t) => t.trim()).filter(Boolean);
+
+  await sendTelegramMessage(telegramBotToken, telegramChatId, `📋 聯絡簿回覆建議（${date}）`);
+  for (const text of versions) {
+    for (const chunk of splitTelegramMessage(text)) {
+      await sendTelegramMessage(telegramBotToken, telegramChatId, chunk);
+    }
+  }
+}
+
+async function fetchMessageRooms(token) {
+  const payload = await requestJson(`${API_BASE}/family/message_rooms`, {
+    headers: buildHeaders(token),
+  });
+  if (payload.ret_code !== 200) {
+    throw new Error(`Could not load message rooms: ${payload.ret_desc || JSON.stringify(payload)}`);
+  }
+  return Array.isArray(payload.message_rooms) ? payload.message_rooms : [];
+}
+
+async function markRoomAsRead(token, roomId) {
+  const payload = await requestJson(`${API_BASE}/family/message_read`, {
+    method: "POST",
+    headers: buildJsonHeaders(token),
+    body: JSON.stringify({ room_id: roomId }),
+  });
+  if (payload.ret_code !== 200) {
+    throw new Error(`Could not mark room ${roomId} as read: ${payload.ret_desc || JSON.stringify(payload)}`);
+  }
+}
+
+async function fetchMessagesByRoomId(token, roomId) {
+  const url = new URL(`${API_BASE}/family/messages_by_room_id`);
+  url.searchParams.set("room_id", roomId);
+  const payload = await requestJson(url.toString(), {
+    headers: buildHeaders(token),
+  });
+  if (payload.ret_code !== 200) {
+    throw new Error(`Could not load messages for room ${roomId}: ${payload.ret_desc || JSON.stringify(payload)}`);
+  }
+  return Array.isArray(payload.messages) ? payload.messages : [];
+}
+
+async function processMessages({ token, user, children, telegramBotToken, telegramChatId, lineAccessToken, lineUserId, debug }) {
+  const rooms = await fetchMessageRooms(token);
+
+  if (debug) {
+    process.stderr.write(`取得 ${rooms.length} 個聊天室。\n`);
+  }
+
+  // Build member key for current logged-in parent (user_type 3)
+  const memberKey = user?.id ? `${user.id}-3` : null;
+
+  const lastMsgMap = await loadLastMsgMap();
+  // Drop legacy global floor key — each room is tracked independently
+  const updatedMap = { ...lastMsgMap };
+  delete updatedMap._global;
+  const sent = [];
+  const authHeaders = buildHeaders(token);
+
+  for (const room of rooms) {
+    const roomId = room.id || room.room_id;
+
+    // Determine from-ID: per-room local tracking takes precedence; fall back to legacy global floor
+    const memberInfo = memberKey && room.members ? room.members[memberKey] : null;
+    const serverLastReadId = memberInfo ? Number(memberInfo.last_read_id || 0) : 0;
+    const unreadCount = memberInfo ? Number(memberInfo.unread_count || 0) : 0;
+    const localRoomLastId = Number(lastMsgMap[roomId] || 0);
+    // Server's last_read_id is authoritative; local cursor only used when server has no data
+    const fromId = serverLastReadId > 0 ? serverLastReadId : localRoomLastId;
+
+    if (debug) {
+      process.stderr.write(
+        `Room ${roomId}: memberKey=${memberKey}, serverLastReadId=${serverLastReadId}, unreadCount=${unreadCount}, fromId=${fromId}\n`,
+      );
+    }
+
+    // Skip if no unread messages according to server
+    if (memberKey && unreadCount === 0) {
+      continue;
+    }
+
+    // Skip if latest message is not newer than what we've already processed
+    const latestId = Number(room.latest_message_id || 0);
+    if (latestId <= fromId) {
+      continue;
+    }
+
+    let messages;
+    try {
+      messages = await fetchMessagesByRoomId(token, roomId);
+    } catch (err) {
+      process.stderr.write(`讀取聊天室 ${roomId} 失敗: ${err.message}\n`);
+      continue;
+    }
+
+    // Filter to only new messages, exclude messages sent by the logged-in user
+    const newMessages = messages
+      .filter((msg) => Number(msg.id || 0) > fromId)
+      .filter((msg) => {
+        if (!memberKey || !msg.user) return true;
+        return `${msg.user.id}-${msg.user.user_type}` !== memberKey;
+      });
+
+    if (debug) {
+      process.stderr.write(`聊天室 ${roomId}：共 ${messages.length} 則，新訊息 ${newMessages.length} 則。\n`);
+    }
+
+    // Derive child name from room name (e.g. "xxx-戴于喬的聊天室")
+    const roomChildName =
+      children.find((c) => room.name?.includes(c.name))?.name || "";
+
+    let roomHadDeliveryFailure = false;
+    for (const msg of newMessages) {
+      const id = Number(msg.id || 0);
+      const childName = roomChildName;
+      const sender = msg.user?.name || "老師";
+      const date = (msg.create_time || "").slice(0, 10);
+      const header = ["私訊", childName, date].filter(Boolean).join(" — ");
+      const content = String(msg.content || "").trim();
+
+      if (!isImageContent(content) && !content) {
+        continue;
+      }
+
+      const lineText = `${header}\n${sender}${content ? `\n\n${content}` : ""}`;
+
+      // TG
+      let tgOk = false;
+      try {
+        if (isImageContent(content)) {
+          const imageUrl = buildImageUrl(content, msg.create_time);
+          const caption = truncateTelegramCaption(`${header}\n${sender}`);
+          await sendTelegramPhotoFromUrl(telegramBotToken, telegramChatId, imageUrl, caption, authHeaders);
+        } else {
+          await sendTelegramMessage(telegramBotToken, telegramChatId, lineText);
+        }
+        tgOk = true;
+      } catch (err) {
+        process.stderr.write(`Telegram 轉發訊息 ${id} 失敗: ${err.message}\n`);
+      }
+
+      // LINE（文字訊息，圖片略過）
+      let lineOk = true; // LINE is optional; treat as ok when not configured
+      if (lineAccessToken && lineUserId && !isImageContent(content)) {
+        lineOk = false;
+        try {
+          await sendLineMessage(lineAccessToken, lineUserId, lineText);
+          lineOk = true;
+        } catch (err) {
+          process.stderr.write(`LINE 轉發訊息 ${id} 失敗: ${err.message}\n`);
+        }
+      }
+
+      if (!tgOk || !lineOk) {
+        process.stderr.write(`訊息 ${id} 傳送未完成，略過更新游標以便下次重試。\n`);
+        roomHadDeliveryFailure = true;
+        continue;
+      }
+
+      if (id > (updatedMap[roomId] || 0)) updatedMap[roomId] = id;
+      sent.push({ id, childName, sender });
+    }
+
+    // Only mark room as read when every message in this room was delivered
+    if (unreadCount > 0 && !roomHadDeliveryFailure) {
+      try {
+        await markRoomAsRead(token, roomId);
+        if (debug) {
+          process.stderr.write(`Room ${roomId}: 已標示已讀。\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`Room ${roomId}: 標示已讀失敗: ${err.message}\n`);
+      }
+    }
+  }
+
+  await saveLastMsgMap(updatedMap);
+
+  return sent;
+}
+
 function sanitizePathSegment(value) {
   return String(value).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim() || "unknown";
 }
@@ -446,8 +846,21 @@ function splitTelegramMessage(text, limit = 4000) {
       }
       if (partial) {
         chunks.push(partial);
+        partial = "";
       }
-      partial = line;
+      if (line.length <= limit) {
+        partial = line;
+        continue;
+      }
+      // line itself exceeds limit — split by character
+      for (let i = 0; i < line.length; i += limit) {
+        const slice = line.slice(i, i + limit);
+        if (i + limit < line.length) {
+          chunks.push(slice);
+        } else {
+          partial = slice;
+        }
+      }
     }
     current = partial;
   }
@@ -811,7 +1224,7 @@ function parseMedicineFile(content, fallbackDate) {
 
   for (const section of sections) {
     const lines = section.split("\n").map((line) => line.trim()).filter(Boolean);
-    const detailMarkers = [/^時機\s*:/, /^時間\s*:/, /^類型\s*:/];
+    const detailMarkers = [/^時機\s*[:\uff1a]/, /^時間\s*[:\uff1a]/, /^類型\s*[:\uff1a]/];
     const markerCount = detailMarkers.filter((rx) => lines.some((line) => rx.test(line))).length;
     const looksLikeDetail = markerCount >= 2;
     if (looksLikeDetail) {
@@ -825,7 +1238,7 @@ function parseMedicineFile(content, fallbackDate) {
         remark: "",
       };
       for (const line of lines) {
-        const separator = line.indexOf(":");
+        const separator = line.search(/[:\uff1a]/);
         if (separator === -1) {
           continue;
         }
@@ -856,7 +1269,7 @@ function parseMedicineFile(content, fallbackDate) {
     }
 
     for (const line of lines) {
-      const separator = line.indexOf(":");
+      const separator = line.search(/[:\uff1a]/);
       if (separator === -1) {
         continue;
       }
@@ -911,9 +1324,23 @@ function buildMedicinePayload(child, user, parsed) {
   }
 
   const currentSchools = child.raw.schools?.now || {};
-  const schoolKey = Object.keys(currentSchools)[0];
+  const schoolKeys = Object.keys(currentSchools);
+  if (schoolKeys.length === 0) {
+    throw new Error(`Could not determine current class for ${child.name}: no current schools`);
+  }
+  if (schoolKeys.length > 1) {
+    throw new Error(`${child.name} 目前有多所學校 (${schoolKeys.join(", ")})，請確認正確班級後手動指定`);
+  }
+  const schoolKey = schoolKeys[0];
   const school = currentSchools[schoolKey];
-  const classKey = Object.keys(school?.classes || {})[0];
+  const classKeys = Object.keys(school?.classes || {});
+  if (classKeys.length === 0) {
+    throw new Error(`Could not determine current class for ${child.name}: no classes in school ${schoolKey}`);
+  }
+  if (classKeys.length > 1) {
+    throw new Error(`${child.name} 在學校 ${schoolKey} 有多個班級 (${classKeys.join(", ")})，請確認正確班級後手動指定`);
+  }
+  const classKey = classKeys[0];
   const classId = Number(classKey);
   const classInfo = school?.classes?.[classKey];
   if (!classId || !classInfo) {
@@ -953,54 +1380,59 @@ async function processMedicineFiles({ token, user, phone, password, children, fa
   await checkUserPassword(token, phone, password);
 
   for (const child of children) {
-    const filePath = await resolveMedicineFile(child, DEFAULT_MEDICINE_DIR);
-    if (!filePath) {
+    try {
+      const filePath = await resolveMedicineFile(child, DEFAULT_MEDICINE_DIR);
+      if (!filePath) {
+        summary.push({
+          child_name: child.name,
+          status: "skipped",
+          reason: "medicine file not found",
+        });
+        continue;
+      }
+
+      const parsed = parseMedicineFile(await fs.readFile(filePath, "utf8"), fallbackDate);
+      const payload = buildMedicinePayload(child, user, parsed);
+      const range = monthRange(parsed.date);
+      const existingForms = await fetchMedicineForms(token, child.babyId, range.start, range.end);
+      const existingSameDay = existingForms
+        .filter((form) => form.date === parsed.date)
+        .sort((left, right) => Number(right.id) - Number(left.id));
+
+      const editable = existingSameDay.find((form) => !form.checked?.status);
+      let medicineForm;
+      let action;
+      if (editable) {
+        medicineForm = await patchMedicineForm(token, {
+          id: editable.id,
+          date: payload.date,
+          reason: payload.reason,
+          details: payload.details,
+          store_way: payload.store_way,
+          sign: payload.sign,
+          doctor_orders: payload.doctor_orders,
+        });
+        action = "updated";
+      } else {
+        medicineForm = await postMedicineForm(token, payload);
+        action = "created";
+      }
+
       summary.push({
         child_name: child.name,
-        status: "skipped",
-        reason: "medicine file not found",
+        action,
+        date: parsed.date,
+        id: medicineForm.id,
+        file: filePath,
+        detail_count: Object.keys(medicineForm.details || {}).length,
       });
-      continue;
-    }
 
-    const parsed = parseMedicineFile(await fs.readFile(filePath, "utf8"), fallbackDate);
-    const payload = buildMedicinePayload(child, user, parsed);
-    const range = monthRange(parsed.date);
-    const existingForms = await fetchMedicineForms(token, child.babyId, range.start, range.end);
-    const existingSameDay = existingForms
-      .filter((form) => form.date === parsed.date)
-      .sort((left, right) => Number(right.id) - Number(left.id));
-
-    const editable = existingSameDay.find((form) => !form.checked?.status);
-    let medicineForm;
-    let action;
-    if (editable) {
-      medicineForm = await patchMedicineForm(token, {
-        id: editable.id,
-        date: payload.date,
-        reason: payload.reason,
-        details: payload.details,
-        store_way: payload.store_way,
-        sign: payload.sign,
-        doctor_orders: payload.doctor_orders,
-      });
-      action = "updated";
-    } else {
-      medicineForm = await postMedicineForm(token, payload);
-      action = "created";
-    }
-
-    summary.push({
-      child_name: child.name,
-      action,
-      date: parsed.date,
-      id: medicineForm.id,
-      file: filePath,
-      detail_count: Object.keys(medicineForm.details || {}).length,
-    });
-
-    if (debug) {
-      console.error(`Medicine ${action} for ${child.name} on ${parsed.date}`);
+      if (debug) {
+        console.error(`Medicine ${action} for ${child.name} on ${parsed.date}`);
+      }
+    } catch (err) {
+      console.error(`Error processing medicine for ${child.name}: ${err.message}`);
+      summary.push({ child_name: child.name, status: "error", error: err.message });
     }
   }
 
@@ -1047,12 +1479,15 @@ async function main() {
   if (args.wait) {
     await waitUntilTaipei1800();
   }
-  const { phone, password, telegramBotToken, telegramChatId } = await loadConfig();
+  const { phone, password, telegramBotToken, telegramChatId, geminiApiKey, lineAccessToken, lineUserId } = await loadConfig();
   const dates = expandDates(args);
   const outputDir = path.resolve(args.output);
 
-  if (args.sendTelegram && (!telegramBotToken || !telegramChatId)) {
+  if ((args.sendTelegram || args.fetchMessages || args.autoReply) && (!telegramBotToken || !telegramChatId)) {
     throw new Error("Expected TG_BOT_TOKEN and TG_CHAT_ID in .env");
+  }
+  if (args.autoReply && !geminiApiKey) {
+    throw new Error("Expected GEMINI_API_KEY in .env");
   }
 
   if (!args.telegramOnly) {
@@ -1060,6 +1495,7 @@ async function main() {
   }
 
   const token = await login(phone, password);
+
   const user = await fetchUser(token);
   const children = await fetchChildren(token);
 
@@ -1074,17 +1510,27 @@ async function main() {
   };
 
   for (const child of children) {
+    let sourceUrl;
+    let booksByDate = new Map();
+
     try {
-      const { sourceUrl, payload } = await fetchContactBooks(token, child.babyId, dates[0], dates[dates.length - 1]);
-      const booksByDate = new Map();
-      for (const book of payload.contact_books) {
-        if (!book || typeof book.date !== "string") {
-          continue;
-        }
+      const fetched = await fetchContactBooks(token, child.babyId, dates[0], dates[dates.length - 1]);
+      sourceUrl = fetched.sourceUrl;
+      for (const book of fetched.payload.contact_books) {
+        if (!book || typeof book.date !== "string") continue;
         booksByDate.set(book.date, book);
       }
+      if (args.debug) {
+        console.error(`Fetched ${fetched.payload.contact_books.length} contact_books for ${child.name}`);
+      }
+    } catch (err) {
+      console.error(`Error fetching contact books for ${child.name}: ${err.message}`);
+      summary.files.push({ child_name: child.name, baby_id: child.babyId, error: err.message });
+      continue;
+    }
 
-      for (const targetDate of dates) {
+    for (const targetDate of dates) {
+      try {
         const book = booksByDate.get(targetDate);
         if (!book) {
           const document = buildEmptyDocument(child, targetDate, sourceUrl);
@@ -1094,6 +1540,13 @@ async function main() {
               await sendDocumentToTelegram(telegramBotToken, telegramChatId, document);
             } catch (telegramError) {
               await handleTelegramError(summary, telegramBotToken, telegramChatId, child.name, targetDate, telegramError);
+            }
+          }
+          if (args.sendTelegram && lineAccessToken && lineUserId) {
+            try {
+              await sendDocumentToLine(lineAccessToken, lineUserId, document);
+            } catch (lineError) {
+              process.stderr.write(`LINE 發送失敗 (${child.name} ${targetDate}): ${lineError.message}\n`);
             }
           }
           summary.files.push({
@@ -1134,6 +1587,13 @@ async function main() {
             await handleTelegramError(summary, telegramBotToken, telegramChatId, child.name, targetDate, telegramError);
           }
         }
+        if (args.sendTelegram && lineAccessToken && lineUserId) {
+          try {
+            await sendDocumentToLine(lineAccessToken, lineUserId, document);
+          } catch (lineError) {
+            process.stderr.write(`LINE 發送失敗 (${child.name} ${targetDate}): ${lineError.message}\n`);
+          }
+        }
         summary.files.push({
           child_name: child.name,
           baby_id: child.babyId,
@@ -1142,18 +1602,10 @@ async function main() {
           auto_signed: autoSigned,
           markdown: written?.mdPath || null,
         });
+      } catch (err) {
+        console.error(`Error processing contact book for ${child.name} on ${targetDate}: ${err.message}`);
+        summary.files.push({ child_name: child.name, baby_id: child.babyId, date: targetDate, error: err.message });
       }
-
-      if (args.debug) {
-        console.error(`Fetched ${payload.contact_books.length} contact_books for ${child.name}`);
-      }
-    } catch (err) {
-      console.error(`Error processing contact books for ${child.name}: ${err.message}`);
-      summary.files.push({
-        child_name: child.name,
-        baby_id: child.babyId,
-        error: err.message,
-      });
     }
   }
 
@@ -1164,7 +1616,35 @@ async function main() {
       phone,
       password,
       children: filterChildrenForMedicine(children, args.medicineTarget),
-      fallbackDate: getTomorrowString(),
+      fallbackDate: args.date ? dates[0] : getTomorrowString(),
+      debug: args.debug,
+    });
+  }
+
+  if (args.fetchMessages) {
+    const msgsSent = await processMessages({
+      token,
+      user,
+      children,
+      telegramBotToken,
+      telegramChatId,
+      lineAccessToken,
+      lineUserId,
+      debug: args.debug,
+    });
+    if (args.debug) {
+      process.stderr.write(`轉發訊息 ${msgsSent.length} 則。\n`);
+    }
+  }
+
+  if (args.autoReply) {
+    await processAutoReply({
+      token,
+      children,
+      date: dates[0],
+      telegramBotToken,
+      telegramChatId,
+      geminiApiKey,
       debug: args.debug,
     });
   }

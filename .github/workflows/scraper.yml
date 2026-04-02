@@ -3,7 +3,8 @@ name: Daily scraper
 on:
   workflow_dispatch:
   schedule:
-    - cron: "01 09 * * *"
+    - cron: "42 0-7,9 * * *"
+    - cron: "42 8 * * *"
 
 jobs:
   scrape:
@@ -59,5 +60,10 @@ jobs:
           }
           NODE
 
-      - name: Run scraper
-        run: node scraper.js --tg-only --wait
+      - name: Run message polling
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '42 0-7,9 * * *' || github.event.schedule == '42 8 * * *'
+        run: node scraper.js --msg
+
+      - name: Run daily notice
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '42 8 * * *'
+        run: node scraper.js --notice --wait
