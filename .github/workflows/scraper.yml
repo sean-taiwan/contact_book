@@ -60,4 +60,4 @@ jobs:
           NODE
 
       - name: Run scraper
-        run: node scraper.js --tg-only
+        run: node scraper.js --tg-only --wait
