@@ -1,6 +1,11 @@
 .env
+.token
+.last_msg_id
 .DS_Store
 node_modules/
 .claude/
-data/
-HANDOFF.md
+Activities/
+Children/
+Daily/
+Food/
+*.md
