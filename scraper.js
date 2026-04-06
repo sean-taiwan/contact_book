@@ -8,7 +8,7 @@ const ENV_PATH = path.join(ROOT, ".env");
 const LAST_MSG_PATH = path.join(ROOT, ".last_msg_id");
 const DEFAULT_OUTPUT_DIR = path.join(ROOT, "Daily");
 const DEFAULT_MEDICINE_DIR = path.join(ROOT, "medicine");
-const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med"]);
+const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med", "--duration"]);
 const MEDICINE_FILE_ALIASES = {
   "戴于硯": ["于硯.txt"],
   "戴于喬": ["于喬.txt"],
@@ -21,7 +21,7 @@ function getHelpText() {
     "",
     "Description:",
     "  讀取聯絡簿，預設抓今天資料，並在可簽名時自動簽名。",
-    "  也可用 --med 指定孩子送出托藥單,托藥單日期固定為明天。",
+    "  也可用 --med 指定孩子送出托藥單,托藥單日期預設為明天。",
     "",
     "Options:",
     "  --date YYYY-MM-DD        指定單一天日期",
@@ -29,8 +29,10 @@ function getHelpText() {
     "  --to YYYY-MM-DD          指定結束日期，需搭配 --from",
     "  --output PATH            聯絡簿輸出目錄，預設為 ./Daily",
     "  --med 1|2                送出托藥單：1=于硯，2=于喬",
+  "  --duration N             搭配 --med，從明天起連續送出 N 天藥單（預設 1）",
     "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
     "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
+    "  --msg_all                讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
     "  --auto_reply             擷取今日兩位孩子聯絡簿老師留言，請 Gemini 擬三段回覆後透過 Telegram 傳送",
     "  --no-sign-missing        不自動簽名聯絡簿",
     "  --wait                   等待至台北時間 18:00:01 再執行",
@@ -45,6 +47,7 @@ function getHelpText() {
     "  node scraper.js --date 2026-04-01",
     "  node scraper.js --from 2026-04-01 --to 2026-04-07",
     "  node scraper.js --med 1",
+    "  node scraper.js --med 1 --duration 3",
     "  node scraper.js --date 2026-04-01 --med 2 --no-sign-missing",
   ].join("\n");
 }
@@ -54,6 +57,7 @@ function parseArgs(argv) {
     output: DEFAULT_OUTPUT_DIR,
     debug: false,
     medicineTarget: null,
+    medicineDuration: 1,
     sendTelegram: false,
     telegramOnly: false,
     signMissing: true,
@@ -88,6 +92,10 @@ function parseArgs(argv) {
       args.fetchMessages = true;
       continue;
     }
+    if (value === "--msg_all") {
+      args.fetchMessagesAll = true;
+      continue;
+    }
     if (value === "--auto_reply") {
       args.autoReply = true;
       continue;
@@ -115,6 +123,12 @@ function parseArgs(argv) {
         throw new Error(`--med must be 1 (于硯) or 2 (于喬)\n\n${getHelpText()}`);
       }
       args.medicineTarget = next;
+    } else if (value === "--duration") {
+      const n = parseInt(next, 10);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new Error(`--duration must be a positive integer\n\n${getHelpText()}`);
+      }
+      args.medicineDuration = n;
     }
     index += 1;
   }
@@ -487,6 +501,31 @@ async function sendLineMessage(accessToken, userId, text) {
   }
 }
 
+async function sendLineImage(accessToken, userId, imageUrl, text) {
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      to: userId,
+      messages: [
+        {
+          type: "image",
+          originalContentUrl: imageUrl,
+          previewImageUrl: imageUrl,
+        },
+        { type: "text", text },
+      ],
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`LINE image send failed (${response.status}): ${body.slice(0, 200)}`);
+  }
+}
+
 function toLineText(document) {
   const lines = [`${document.child_name} ${document.date} 聯絡簿`];
 
@@ -545,11 +584,15 @@ function buildImageUrl(content, createTime) {
   if (content.startsWith("http")) {
     return content;
   }
+  // Extract date from createTime (e.g. "2026-03-13 09:31:48" → "2026-03")
+  const yearMonth = String(createTime || "").slice(0, 7);
+
   if (content.includes("/")) {
-    return `${ASSET_BASE}/${content}`;
+    // Extract filename from path (e.g. "message/2026-03/filename.jpg" → "filename.jpg")
+    const filename = content.split("/").pop();
+    return `${ASSET_BASE}/message/${yearMonth}/${filename}`;
   }
-  // content is filename only — construct date path from create_time (e.g. "2026-04-02 16:31:59")
-  const yearMonth = String(createTime || "").slice(0, 7); // "2026-04"
+  // content is filename only
   return `${ASSET_BASE}/message/${yearMonth}/${content}`;
 }
 
@@ -595,7 +638,7 @@ async function processAutoReply({ token, children, date, telegramBotToken, teleg
   }
 
   if (sections.length === 0) {
-    await sendTelegramMessage(telegramBotToken, telegramChatId, "今日兩位孩子的聯絡簿均無老師留言。");
+    if (debug) process.stderr.write(`auto_reply: 今日聯絡簿無內容，略過。\n`);
     return;
   }
 
@@ -652,7 +695,7 @@ async function fetchMessagesByRoomId(token, roomId) {
   return Array.isArray(payload.messages) ? payload.messages : [];
 }
 
-async function processMessages({ token, user, children, telegramBotToken, telegramChatId, lineAccessToken, lineUserId, debug }) {
+async function processMessages({ token, user, children, telegramBotToken, telegramChatId, lineAccessToken, lineUserId, debug, allMessages = false }) {
   const rooms = await fetchMessageRooms(token);
 
   if (debug) {
@@ -686,14 +729,14 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
       );
     }
 
-    // Skip if no unread messages according to server
-    if (memberKey && unreadCount === 0) {
+    // Skip if no unread messages according to server (skip for --msg_all)
+    if (!allMessages && memberKey && unreadCount === 0) {
       continue;
     }
 
-    // Skip if latest message is not newer than what we've already processed
+    // Skip if latest message is not newer than what we've already processed (skip for --msg_all)
     const latestId = Number(room.latest_message_id || 0);
-    if (latestId <= fromId) {
+    if (!allMessages && latestId <= fromId) {
       continue;
     }
 
@@ -705,16 +748,34 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
       continue;
     }
 
-    // Filter to only new messages, exclude messages sent by the logged-in user
-    const newMessages = messages
-      .filter((msg) => Number(msg.id || 0) > fromId)
-      .filter((msg) => {
-        if (!memberKey || !msg.user) return true;
-        return `${msg.user.id}-${msg.user.user_type}` !== memberKey;
-      });
+    // For --msg_all, take first 2 messages (newest); otherwise filter to new messages
+    let newMessages;
+    if (allMessages) {
+      // Take first 2 messages (newest), exclude messages sent by the logged-in user
+      newMessages = messages
+        .slice(0, 2)
+        .filter((msg) => {
+          if (!memberKey || !msg.user) return true;
+          return `${msg.user.id}-${msg.user.user_type}` !== memberKey;
+        });
+    } else {
+      // Filter to only new messages, exclude messages sent by the logged-in user
+      newMessages = messages
+        .filter((msg) => Number(msg.id || 0) > fromId)
+        .filter((msg) => {
+          if (!memberKey || !msg.user) return true;
+          return `${msg.user.id}-${msg.user.user_type}` !== memberKey;
+        });
+    }
 
     if (debug) {
       process.stderr.write(`聊天室 ${roomId}：共 ${messages.length} 則，新訊息 ${newMessages.length} 則。\n`);
+      if (allMessages && messages.length > 0) {
+        const lastMsg = messages[messages.length - 1];
+        const lastId = Number(lastMsg.id || 0);
+        const lastTime = lastMsg.create_time || "N/A";
+        process.stderr.write(`  最新訊息: ID=${lastId}, 時間=${lastTime}\n`);
+      }
     }
 
     // Derive child name from room name (e.g. "xxx-戴于喬的聊天室")
@@ -734,6 +795,15 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
         continue;
       }
 
+      if (debug) {
+        process.stderr.write(`訊息 ${id} (${msg.create_time}): ${isImageContent(content) ? "圖片" : "文字"} - ${sender}\n`);
+        if (isImageContent(content)) {
+          process.stderr.write(`  原始內容: ${content}\n`);
+          const imageUrl = buildImageUrl(content, msg.create_time);
+          process.stderr.write(`  圖片網址: ${imageUrl}\n`);
+        }
+      }
+
       const lineText = `${header}\n${sender}${content ? `\n\n${content}` : ""}`;
 
       // TG
@@ -751,12 +821,17 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
         process.stderr.write(`Telegram 轉發訊息 ${id} 失敗: ${err.message}\n`);
       }
 
-      // LINE（文字訊息，圖片略過）
+      // LINE（文字訊息 + 圖片）
       let lineOk = true; // LINE is optional; treat as ok when not configured
-      if (lineAccessToken && lineUserId && !isImageContent(content)) {
+      if (lineAccessToken && lineUserId) {
         lineOk = false;
         try {
-          await sendLineMessage(lineAccessToken, lineUserId, lineText);
+          if (isImageContent(content)) {
+            const imageUrl = buildImageUrl(content, msg.create_time);
+            await sendLineImage(lineAccessToken, lineUserId, imageUrl, lineText);
+          } else {
+            await sendLineMessage(lineAccessToken, lineUserId, lineText);
+          }
           lineOk = true;
         } catch (err) {
           process.stderr.write(`LINE 轉發訊息 ${id} 失敗: ${err.message}\n`);
@@ -1535,14 +1610,14 @@ async function main() {
         if (!book) {
           const document = buildEmptyDocument(child, targetDate, sourceUrl);
           const written = await maybeWriteDocument(outputDir, document, args.telegramOnly);
-          if (args.sendTelegram) {
+          if (args.sendTelegram && document.exists) {
             try {
               await sendDocumentToTelegram(telegramBotToken, telegramChatId, document);
             } catch (telegramError) {
               await handleTelegramError(summary, telegramBotToken, telegramChatId, child.name, targetDate, telegramError);
             }
           }
-          if (args.sendTelegram && lineAccessToken && lineUserId) {
+          if (args.sendTelegram && document.exists && lineAccessToken && lineUserId) {
             try {
               await sendDocumentToLine(lineAccessToken, lineUserId, document);
             } catch (lineError) {
@@ -1580,14 +1655,14 @@ async function main() {
         const finalBook = booksByDate.get(targetDate);
         const document = normalizeContactBook(child, targetDate, finalBook, sourceUrl, autoSigned);
         const written = await maybeWriteDocument(outputDir, document, args.telegramOnly);
-        if (args.sendTelegram) {
+        if (args.sendTelegram && document.exists) {
           try {
             await sendDocumentToTelegram(telegramBotToken, telegramChatId, document);
           } catch (telegramError) {
             await handleTelegramError(summary, telegramBotToken, telegramChatId, child.name, targetDate, telegramError);
           }
         }
-        if (args.sendTelegram && lineAccessToken && lineUserId) {
+        if (args.sendTelegram && document.exists && lineAccessToken && lineUserId) {
           try {
             await sendDocumentToLine(lineAccessToken, lineUserId, document);
           } catch (lineError) {
@@ -1610,18 +1685,28 @@ async function main() {
   }
 
   if (args.medicineTarget) {
-    summary.medicine = await processMedicineFiles({
-      token,
-      user,
-      phone,
-      password,
-      children: filterChildrenForMedicine(children, args.medicineTarget),
-      fallbackDate: args.date ? dates[0] : getTomorrowString(),
-      debug: args.debug,
-    });
+    const medChildren = filterChildrenForMedicine(children, args.medicineTarget);
+    const baseDateStr = args.date ? dates[0] : getTomorrowString();
+    const baseDate = new Date(baseDateStr);
+    summary.medicine = [];
+    for (let i = 0; i < args.medicineDuration; i++) {
+      const d = new Date(baseDate);
+      d.setDate(d.getDate() + i);
+      const dateStr = dateToString(d);
+      const result = await processMedicineFiles({
+        token,
+        user,
+        phone,
+        password,
+        children: medChildren,
+        fallbackDate: dateStr,
+        debug: args.debug,
+      });
+      summary.medicine.push(...result);
+    }
   }
 
-  if (args.fetchMessages) {
+  if (args.fetchMessages || args.fetchMessagesAll) {
     const msgsSent = await processMessages({
       token,
       user,
@@ -1631,6 +1716,7 @@ async function main() {
       lineAccessToken,
       lineUserId,
       debug: args.debug,
+      allMessages: args.fetchMessagesAll,
     });
     if (args.debug) {
       process.stderr.write(`轉發訊息 ${msgsSent.length} 則。\n`);
