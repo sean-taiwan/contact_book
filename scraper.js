@@ -33,7 +33,7 @@ function getHelpText() {
     "  --del_med 1|2            刪除指定孩子的所有托藥單：1=孩子1，2=孩子2",
     "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
     "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
-    "  --msg_debug              [偵錯] 讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
+    "  --msg_debug              [偵錯用] 讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
     "  --auto_reply             擷取今日兩位孩子聯絡簿老師留言，請 Gemini 擬三段回覆後透過 Telegram 傳送",
     "  --no-sign-missing        不自動簽名聯絡簿",
     "  --wait                   等待至台北時間 18:00:01 再執行",
@@ -64,6 +64,7 @@ function parseArgs(argv) {
     telegramOnly: false,
     signMissing: true,
     fetchMessages: false,
+    fetchMessagesDebug: false,
     autoReply: false,
   };
 
@@ -95,7 +96,7 @@ function parseArgs(argv) {
       continue;
     }
     if (value === "--msg_debug") {
-      args.fetchMessagesAll = true;
+      args.fetchMessagesDebug = true;
       continue;
     }
     if (value === "--auto_reply") {
@@ -145,6 +146,9 @@ function parseArgs(argv) {
   }
   if ((args.from && !args.to) || (!args.from && args.to)) {
     throw new Error(`--from and --to must be used together\n\n${getHelpText()}`);
+  }
+  if (args.autoReply && (args.from || args.to)) {
+    throw new Error(`--auto_reply does not support date ranges; use --date or omit for today\n\n${getHelpText()}`);
   }
 
   return args;
@@ -538,15 +542,16 @@ async function sendTelegramMessage(botToken, chatId, text) {
 
 async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption) {
   return withRetry(async () => {
-    // Image URL is public — pass it directly to Telegram (same as LINE behavior)
-    const body = { chat_id: chatId, photo: imageUrl };
-    if (caption) body.caption = caption;
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    // Image URLs are public; pass the URL directly to Telegram instead of downloading
+    const payload = await requestJson(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: "POST",
       headers: { "content-type": "application/json;charset=UTF-8" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: imageUrl,
+        ...(caption ? { caption } : {}),
+      }),
     });
-    const payload = await response.json();
     if (!payload.ok) {
       throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
     }
@@ -1803,7 +1808,7 @@ async function main() {
     summary.medicine.push(...result);
   }
 
-  if (args.fetchMessages || args.fetchMessagesAll) {
+  if (args.fetchMessages || args.fetchMessagesDebug) {
     const msgsSent = await processMessages({
       token,
       user,
@@ -1813,7 +1818,7 @@ async function main() {
       lineAccessToken,
       lineUserId,
       debug: args.debug,
-      allMessages: args.fetchMessagesAll,
+      allMessages: args.fetchMessagesDebug,
     });
     if (args.debug) {
       process.stderr.write(`轉發訊息 ${msgsSent.length} 則。\n`);
@@ -1821,17 +1826,15 @@ async function main() {
   }
 
   if (args.autoReply) {
-    for (const date of dates) {
-      await processAutoReply({
-        token,
-        children,
-        date,
-        telegramBotToken,
-        telegramChatId,
-        geminiApiKey,
-        debug: args.debug,
-      });
-    }
+    await processAutoReply({
+      token,
+      children,
+      date: dates[0],
+      telegramBotToken,
+      telegramChatId,
+      geminiApiKey,
+      debug: args.debug,
+    });
   }
 
   const hasProblems =
