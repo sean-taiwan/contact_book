@@ -275,6 +275,23 @@ async function saveLastMsgMap(map) {
   await fs.writeFile(LAST_MSG_PATH, JSON.stringify(map), "utf8");
 }
 
+async function withRetry(fn, { retries = 3, delayMs = 2000, label = "" } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        const wait = delayMs * attempt;
+        process.stderr.write(`${label ? label + ": " : ""}attempt ${attempt} failed (${err.message}), retrying in ${wait}ms...\n`);
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function requestJsonSoft(url, options = {}) {
   try {
     const response = await fetch(url, options);
@@ -286,16 +303,18 @@ async function requestJsonSoft(url, options = {}) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText} from ${url}: ${text.slice(0, 500)}`);
-  }
-  try {
-    return text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(`Non-JSON response from ${url}: ${text.slice(0, 500)}`);
-  }
+  return withRetry(async () => {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText} from ${url}: ${text.slice(0, 500)}`);
+    }
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(`Non-JSON response from ${url}: ${text.slice(0, 500)}`);
+    }
+  }, { label: url.replace(/\?.*/, "").split("/").slice(-2).join("/") });
 }
 
 function buildHeaders(token) {
@@ -518,69 +537,75 @@ async function sendTelegramMessage(botToken, chatId, text) {
 }
 
 async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption, authHeaders) {
-  // Download image with auth headers, then upload to Telegram as binary
-  const imgResponse = await fetch(imageUrl, { headers: authHeaders });
-  if (!imgResponse.ok) {
-    throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
-  }
-  const blob = await imgResponse.blob();
-  const form = new FormData();
-  form.append("chat_id", chatId);
-  form.append("photo", blob, "photo.jpg");
-  if (caption) {
-    form.append("caption", caption);
-  }
-  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
-    method: "POST",
-    body: form,
-  });
-  const payload = await response.json();
-  if (!payload.ok) {
-    throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
-  }
+  return withRetry(async () => {
+    // Download image with auth headers, then upload to Telegram as binary
+    const imgResponse = await fetch(imageUrl, { headers: authHeaders });
+    if (!imgResponse.ok) {
+      throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
+    }
+    const blob = await imgResponse.blob();
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    form.append("photo", blob, "photo.jpg");
+    if (caption) {
+      form.append("caption", caption);
+    }
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    });
+    const payload = await response.json();
+    if (!payload.ok) {
+      throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
+    }
+  }, { label: "Telegram sendPhoto" });
 }
 
 async function sendLineMessage(accessToken, userId, text) {
-  const response = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      to: userId,
-      messages: [{ type: "text", text }],
-    }),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`LINE send failed (${response.status}): ${body.slice(0, 200)}`);
-  }
+  return withRetry(async () => {
+    const response = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        to: userId,
+        messages: [{ type: "text", text }],
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`LINE send failed (${response.status}): ${body.slice(0, 200)}`);
+    }
+  }, { label: "LINE sendMessage" });
 }
 
 async function sendLineImage(accessToken, userId, imageUrl, text) {
-  const response = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      to: userId,
-      messages: [
-        {
-          type: "image",
-          originalContentUrl: imageUrl,
-          previewImageUrl: imageUrl,
-        },
-        { type: "text", text },
-      ],
-    }),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`LINE image send failed (${response.status}): ${body.slice(0, 200)}`);
-  }
+  return withRetry(async () => {
+    const response = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        to: userId,
+        messages: [
+          {
+            type: "image",
+            originalContentUrl: imageUrl,
+            previewImageUrl: imageUrl,
+          },
+          { type: "text", text },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`LINE image send failed (${response.status}): ${body.slice(0, 200)}`);
+    }
+  }, { label: "LINE sendImage" });
 }
 
 function toLineText(document) {
@@ -655,21 +680,26 @@ function buildImageUrl(content, createTime) {
 
 async function callGeminiText(apiKey, prompt) {
   const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-  });
-  const json = await response.json();
-  if (json.error) {
-    throw new Error(`Gemini API 錯誤: ${json.error.message}`);
-  }
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    const reason = json.candidates?.[0]?.finishReason || "unknown";
-    throw new Error(`Gemini 回應無文字內容 (finishReason: ${reason})`);
-  }
-  return text;
+  return withRetry(async () => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    if (!response.ok) {
+      throw new Error(`Gemini HTTP ${response.status}: ${await response.text().catch(() => "")}`);
+    }
+    const json = await response.json();
+    if (json.error) {
+      throw new Error(`Gemini API 錯誤: ${json.error.message}`);
+    }
+    const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      const reason = json.candidates?.[0]?.finishReason || "unknown";
+      throw new Error(`Gemini 回應無文字內容 (finishReason: ${reason})`);
+    }
+    return text;
+  }, { label: "Gemini" });
 }
 
 async function processAutoReply({ token, children, date, telegramBotToken, telegramChatId, geminiApiKey, debug }) {
