@@ -9,9 +9,9 @@ const LAST_MSG_PATH = path.join(ROOT, ".last_msg_id");
 const DEFAULT_OUTPUT_DIR = path.join(ROOT, "Daily");
 const DEFAULT_MEDICINE_DIR = path.join(ROOT, "medicine");
 const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med", "--duration", "--del_med"]);
-const MEDICINE_FILE_ALIASES = {
-  "孩子1全名": ["孩子1.txt"],
-  "孩子2全名": ["孩子2.txt"],
+const MEDICINE_FILE_BY_INDEX = {
+  "1": "孩子1.txt",
+  "2": "孩子2.txt",
 };
 
 function getHelpText() {
@@ -1525,34 +1525,37 @@ function buildMedicinePayload(child, user, parsed) {
   };
 }
 
-async function resolveMedicineFile(child, medicineDir) {
-  const aliases = MEDICINE_FILE_ALIASES[child.name] || [`${child.name}.txt`];
-  for (const alias of aliases) {
-    const filePath = path.join(medicineDir, alias);
-    try {
-      const stat = await fs.stat(filePath);
-      if (stat.isFile()) {
-        return filePath;
-      }
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
+async function resolveMedicineFile(medicineIndex, medicineDir) {
+  const fileName = MEDICINE_FILE_BY_INDEX[medicineIndex] || `孩子${medicineIndex}.txt`;
+  const filePath = path.join(medicineDir, fileName);
+  try {
+    const stat = await fs.stat(filePath);
+    if (stat.isFile()) return filePath;
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
   }
   return null;
 }
 
 async function processMedicineFiles({ token, user, phone, password, children, fallbackDate, debug }) {
   const summary = [];
+
+  if (children.length === 0) {
+    summary.push({ status: "error", error: "找不到對應的孩子，請確認 --med 的編號正確" });
+    return summary;
+  }
+
   await checkUserPassword(token, phone, password);
 
   for (const child of children) {
     try {
-      const filePath = await resolveMedicineFile(child, DEFAULT_MEDICINE_DIR);
+      const filePath = await resolveMedicineFile(child.medicineIndex, DEFAULT_MEDICINE_DIR);
       if (!filePath) {
+        const expected = MEDICINE_FILE_BY_INDEX[child.medicineIndex] || `孩子${child.medicineIndex}.txt`;
         summary.push({
           child_name: child.name,
           status: "skipped",
-          reason: "medicine file not found",
+          reason: `找不到托藥單檔案，請確認 ./medicine/${expected} 存在`,
         });
         continue;
       }
@@ -1607,14 +1610,13 @@ async function processMedicineFiles({ token, user, phone, password, children, fa
 
 function filterChildrenForMedicine(children, medicineTarget) {
   if (!medicineTarget) {
-    return children;
+    return children.map((child, i) => ({ ...child, medicineIndex: String(i + 1) }));
   }
-  const childByOption = {
-    "1": "孩子1全名",
-    "2": "孩子2全名",
-  };
-  const targetName = childByOption[medicineTarget];
-  return children.filter((child) => child.name === targetName);
+  const index = parseInt(medicineTarget, 10) - 1;
+  if (index < 0 || index >= children.length) {
+    return [];
+  }
+  return [{ ...children[index], medicineIndex: medicineTarget }];
 }
 
 async function waitUntilTaipei1800() {
@@ -1842,6 +1844,15 @@ async function main() {
     summary.files.some((item) => item.error) ||
     summary.medicine.some((item) => item.status === "skipped" || item.error) ||
     summary.telegram_errors.length > 0;
+
+  for (const item of summary.medicine) {
+    if (item.status === "skipped") {
+      process.stderr.write(`警告: ${item.reason || "medicine file not found"}\n`);
+    } else if (item.error) {
+      process.stderr.write(`錯誤: ${item.error}\n`);
+    }
+  }
+
   process.stdout.write(`${hasProblems ? "有問題" : "成功完成"}\n`);
 }
 
