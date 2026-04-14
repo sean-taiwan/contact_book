@@ -10,8 +10,8 @@ const DEFAULT_OUTPUT_DIR = path.join(ROOT, "Daily");
 const DEFAULT_MEDICINE_DIR = path.join(ROOT, "medicine");
 const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med", "--duration", "--del_med"]);
 const MEDICINE_FILE_ALIASES = {
-  "戴于硯": ["于硯.txt"],
-  "戴于喬": ["于喬.txt"],
+  "孩子1全名": ["孩子1.txt"],
+  "孩子2全名": ["孩子2.txt"],
 };
 
 function getHelpText() {
@@ -28,9 +28,9 @@ function getHelpText() {
     "  --from YYYY-MM-DD        指定起始日期，需搭配 --to",
     "  --to YYYY-MM-DD          指定結束日期，需搭配 --from",
     "  --output PATH            聯絡簿輸出目錄，預設為 ./Daily",
-    "  --med 1|2                送出托藥單：1=于硯，2=于喬",
+    "  --med 1|2                送出托藥單：1=孩子1，2=孩子2",
     "  --duration N             搭配 --med，從明天起連續送出 N 天藥單（預設 1）",
-    "  --del_med 1|2            刪除指定孩子的所有托藥單：1=于硯，2=于喬",
+    "  --del_med 1|2            刪除指定孩子的所有托藥單：1=孩子1，2=孩子2",
     "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
     "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
     "  --msg_all                讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
@@ -40,8 +40,8 @@ function getHelpText() {
     "  --debug                  顯示額外偵錯資訊",
     "",
     "Medicine Files:",
-    "  --med 1 會讀取 ./medicine/于硯.txt",
-    "  --med 2 會讀取 ./medicine/于喬.txt",
+    "  --med 1 會讀取 ./medicine/孩子1.txt",
+    "  --med 2 會讀取 ./medicine/孩子2.txt",
     "",
     "Examples:",
     "  node scraper.js",
@@ -122,7 +122,7 @@ function parseArgs(argv) {
       args.output = next;
     } else if (value === "--med") {
       if (!["1", "2"].includes(next)) {
-        throw new Error(`--med must be 1 (于硯) or 2 (于喬)\n\n${getHelpText()}`);
+        throw new Error(`--med must be 1 (孩子1) or 2 (孩子2)\n\n${getHelpText()}`);
       }
       args.medicineTarget = next;
     } else if (value === "--duration") {
@@ -133,7 +133,7 @@ function parseArgs(argv) {
       args.medicineDuration = n;
     } else if (value === "--del_med") {
       if (!["1", "2"].includes(next)) {
-        throw new Error(`--del_med must be 1 (于硯) or 2 (于喬)\n\n${getHelpText()}`);
+        throw new Error(`--del_med must be 1 (孩子1) or 2 (孩子2)\n\n${getHelpText()}`);
       }
       args.deleteMedicineTarget = next;
     }
@@ -736,7 +736,7 @@ async function processAutoReply({ token, children, date, telegramBotToken, teleg
   const combinedNotes = sections.join("\n\n");
   const prompt =
     `你是一位溫柔且充滿感激的家長（家有兩歲雙胞胎）。以下是今日托嬰聯絡簿老師的留言，` +
-    `包含兩位孩子（于硯、于喬）的紀錄。請根據老師紀錄的細節，撰寫三段不同風格且自然的家長回覆` +
+    `包含兩位孩子（孩子1、孩子2）的紀錄。請根據老師紀錄的細節，撰寫三段不同風格且自然的家長回覆` +
     `（例如：感謝風格、成長觀察風格、簡潔溫馨風格）。每段回覆在 30-50 字內，可以同時提及兩位孩子。` +
     `請直接輸出這三段回覆，中間用 '###' 隔開，不要提供任何序言、標題或額外解釋。\n\n${combinedNotes}`;
 
@@ -869,7 +869,7 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
       }
     }
 
-    // Derive child name from room name (e.g. "xxx-戴于喬的聊天室")
+    // Derive child name from room name (e.g. "xxx-孩子全名的聊天室")
     const roomChildName =
       children.find((c) => room.name?.includes(c.name))?.name || "";
 
@@ -1610,8 +1610,8 @@ function filterChildrenForMedicine(children, medicineTarget) {
     return children;
   }
   const childByOption = {
-    "1": "戴于硯",
-    "2": "戴于喬",
+    "1": "孩子1全名",
+    "2": "孩子2全名",
   };
   const targetName = childByOption[medicineTarget];
   return children.filter((child) => child.name === targetName);

@@ -73,13 +73,13 @@ node scraper.js --msg
 ### 托藥單
 
 ```bash
-# 送出于硯的托藥單（讀取 ./medicine/于硯.txt）
+# 送出孩子1的托藥單（讀取 ./medicine/孩子1.txt）
 node scraper.js --med 1
 
-# 送出于喬的托藥單，從明天起連續 3 天
+# 送出孩子2的托藥單，從明天起連續 3 天
 node scraper.js --med 2 --duration 3
 
-# 刪除于硯所有待處理托藥單
+# 刪除孩子1所有待處理托藥單
 node scraper.js --del_med 1
 ```
 
@@ -94,7 +94,7 @@ node scraper.js --del_med 1
 | `--msg` | 轉發老師未讀私訊到 Telegram |
 | `--msg_all` | 轉發所有聊天室最新訊息到 Telegram |
 | `--auto_reply` | 用 Gemini 擬三段聯絡簿回覆，推播到 Telegram |
-| `--med 1\|2` | 送出托藥單（1=于硯，2=于喬） |
+| `--med 1\|2` | 送出托藥單（1=孩子1，2=孩子2） |
 | `--duration N` | 搭配 `--med`，連續送出 N 天（預設 1） |
 | `--del_med 1\|2` | 刪除指定孩子所有待處理托藥單 |
 | `--no-sign-missing` | 停用自動簽名 |
