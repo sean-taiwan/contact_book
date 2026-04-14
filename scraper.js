@@ -8,7 +8,7 @@ const ENV_PATH = path.join(ROOT, ".env");
 const LAST_MSG_PATH = path.join(ROOT, ".last_msg_id");
 const DEFAULT_OUTPUT_DIR = path.join(ROOT, "Daily");
 const DEFAULT_MEDICINE_DIR = path.join(ROOT, "medicine");
-const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med", "--duration"]);
+const KNOWN_VALUE_FLAGS = new Set(["--date", "--from", "--to", "--output", "--med", "--duration", "--del_med"]);
 const MEDICINE_FILE_ALIASES = {
   "戴于硯": ["于硯.txt"],
   "戴于喬": ["于喬.txt"],
@@ -29,7 +29,8 @@ function getHelpText() {
     "  --to YYYY-MM-DD          指定結束日期，需搭配 --from",
     "  --output PATH            聯絡簿輸出目錄，預設為 ./Daily",
     "  --med 1|2                送出托藥單：1=于硯，2=于喬",
-  "  --duration N             搭配 --med，從明天起連續送出 N 天藥單（預設 1）",
+    "  --duration N             搭配 --med，從明天起連續送出 N 天藥單（預設 1）",
+    "  --del_med 1|2            刪除指定孩子的所有托藥單：1=于硯，2=于喬",
     "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
     "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
     "  --msg_all                讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
@@ -58,6 +59,7 @@ function parseArgs(argv) {
     debug: false,
     medicineTarget: null,
     medicineDuration: 1,
+    deleteMedicineTarget: null,
     sendTelegram: false,
     telegramOnly: false,
     signMissing: true,
@@ -129,6 +131,11 @@ function parseArgs(argv) {
         throw new Error(`--duration must be a positive integer\n\n${getHelpText()}`);
       }
       args.medicineDuration = n;
+    } else if (value === "--del_med") {
+      if (!["1", "2"].includes(next)) {
+        throw new Error(`--del_med must be 1 (于硯) or 2 (于喬)\n\n${getHelpText()}`);
+      }
+      args.deleteMedicineTarget = next;
     }
     index += 1;
   }
@@ -444,6 +451,56 @@ async function patchMedicineForm(token, body) {
   return payload.medicine_form;
 }
 
+async function deleteMedicineForm(token, id) {
+  const payload = await requestJson(`${API_BASE}/family/medicine_form`, {
+    method: "DELETE",
+    headers: buildJsonHeaders(token),
+    body: JSON.stringify({ id }),
+  });
+  if (payload.ret_code !== 200) {
+    throw new Error(`Could not delete medicine form: ${payload.ret_desc || JSON.stringify(payload)}`);
+  }
+}
+
+async function processDeleteMedicine({ token, phone, password, children, debug }) {
+  const summary = [];
+  await checkUserPassword(token, phone, password);
+
+  // Search a wide range: from today to 6 months ahead
+  const today = new Date();
+  const startDate = dateToString(today);
+  const future = new Date(today);
+  future.setMonth(future.getMonth() + 6);
+  const endDate = dateToString(future);
+
+  for (const child of children) {
+    try {
+      const existingForms = await fetchMedicineForms(token, child.babyId, startDate, endDate);
+      const deletable = existingForms
+        .filter((form) => !form.checked?.status)
+        .sort((left, right) => Number(right.id) - Number(left.id));
+
+      if (deletable.length === 0) {
+        summary.push({ child_name: child.name, status: "skipped", reason: "no deletable medicine form found" });
+        continue;
+      }
+
+      for (const form of deletable) {
+        await deleteMedicineForm(token, form.id);
+        if (debug) {
+          console.error(`Medicine deleted for ${child.name} id=${form.id} on ${form.date}`);
+        }
+        summary.push({ child_name: child.name, action: "deleted", date: form.date, id: form.id });
+      }
+    } catch (err) {
+      console.error(`Error deleting medicine for ${child.name}: ${err.message}`);
+      summary.push({ child_name: child.name, status: "error", error: err.message });
+    }
+  }
+
+  return summary;
+}
+
 async function sendTelegramMessage(botToken, chatId, text) {
   const payload = await requestJson(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
@@ -629,12 +686,16 @@ async function processAutoReply({ token, children, date, telegramBotToken, teleg
     }
 
     const book = books.find((b) => b.date === date);
+    const parts = [];
+    const batch = book?.teacher_message?.batch ? stripComments(book.teacher_message.batch).trim() : "";
     const content = book?.teacher_message?.content ? stripComments(book.teacher_message.content).trim() : "";
-    if (!content) {
+    if (batch) parts.push(batch);
+    if (content) parts.push(content);
+    if (parts.length === 0) {
       if (debug) process.stderr.write(`auto_reply: ${child.name} 今日無老師留言，略過。\n`);
       continue;
     }
-    sections.push(`【${child.name}的聯絡簿】\n${content}`);
+    sections.push(`【${child.name}的聯絡簿】\n${parts.join("\n")}`);
   }
 
   if (sections.length === 0) {
@@ -1704,6 +1765,18 @@ async function main() {
       });
       summary.medicine.push(...result);
     }
+  }
+
+  if (args.deleteMedicineTarget) {
+    const medChildren = filterChildrenForMedicine(children, args.deleteMedicineTarget);
+    const result = await processDeleteMedicine({
+      token,
+      phone,
+      password,
+      children: medChildren,
+      debug: args.debug,
+    });
+    summary.medicine.push(...result);
   }
 
   if (args.fetchMessages || args.fetchMessagesAll) {
