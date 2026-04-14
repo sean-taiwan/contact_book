@@ -92,7 +92,7 @@ node scraper.js --del_med 1
 | `--output PATH` | 聯絡簿輸出目錄（預設 `./Daily`） |
 | `--notice` | 推播 Telegram／LINE，不寫檔案 |
 | `--msg` | 轉發老師未讀私訊到 Telegram |
-| `--msg_all` | 轉發所有聊天室最新訊息到 Telegram |
+| `--msg_debug` | [偵錯] 轉發所有聊天室最新兩條訊息到 Telegram（不論已讀） |
 | `--auto_reply` | 用 Gemini 擬三段聯絡簿回覆，推播到 Telegram |
 | `--med 1\|2` | 送出托藥單（1=孩子1，2=孩子2） |
 | `--duration N` | 搭配 `--med`，連續送出 N 天（預設 1） |

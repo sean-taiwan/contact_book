@@ -33,7 +33,7 @@ function getHelpText() {
     "  --del_med 1|2            刪除指定孩子的所有托藥單：1=孩子1，2=孩子2",
     "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
     "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
-    "  --msg_all                讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
+    "  --msg_debug              [偵錯] 讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
     "  --auto_reply             擷取今日兩位孩子聯絡簿老師留言，請 Gemini 擬三段回覆後透過 Telegram 傳送",
     "  --no-sign-missing        不自動簽名聯絡簿",
     "  --wait                   等待至台北時間 18:00:01 再執行",
@@ -94,7 +94,7 @@ function parseArgs(argv) {
       args.fetchMessages = true;
       continue;
     }
-    if (value === "--msg_all") {
+    if (value === "--msg_debug") {
       args.fetchMessagesAll = true;
       continue;
     }
@@ -538,22 +538,13 @@ async function sendTelegramMessage(botToken, chatId, text) {
 
 async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption) {
   return withRetry(async () => {
-    // Download image from public URL, then upload as binary
-    // (Telegram sendPhoto with URL only supports ports 80/443)
-    const imgResponse = await fetch(imageUrl);
-    if (!imgResponse.ok) {
-      throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
-    }
-    const blob = await imgResponse.blob();
-    const form = new FormData();
-    form.append("chat_id", chatId);
-    form.append("photo", blob, "photo.jpg");
-    if (caption) {
-      form.append("caption", caption);
-    }
+    // Image URL is public — pass it directly to Telegram (same as LINE behavior)
+    const body = { chat_id: chatId, photo: imageUrl };
+    if (caption) body.caption = caption;
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: "POST",
-      body: form,
+      headers: { "content-type": "application/json;charset=UTF-8" },
+      body: JSON.stringify(body),
     });
     const payload = await response.json();
     if (!payload.ok) {
@@ -821,12 +812,12 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
       );
     }
 
-    // Skip if no unread messages according to server (skip for --msg_all)
+    // Skip if no unread messages according to server (skip for --msg_debug)
     if (!allMessages && memberKey && unreadCount === 0) {
       continue;
     }
 
-    // Skip if latest message is not newer than what we've already processed (skip for --msg_all)
+    // Skip if latest message is not newer than what we've already processed (skip for --msg_debug)
     const latestId = Number(room.latest_message_id || 0);
     if (!allMessages && latestId <= fromId) {
       continue;
@@ -840,7 +831,7 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
       continue;
     }
 
-    // For --msg_all, take first 2 messages (newest); otherwise filter to new messages
+    // For --msg_debug, take first 2 messages (newest); otherwise filter to new messages
     let newMessages;
     if (allMessages) {
       // Take first 2 messages (newest), exclude messages sent by the logged-in user
@@ -1781,9 +1772,10 @@ async function main() {
   if (args.medicineTarget) {
     const medChildren = filterChildrenForMedicine(children, args.medicineTarget);
     const baseDateStr = args.date ? dates[0] : getTomorrowString();
+    const baseDate = new Date(`${baseDateStr}T00:00:00`);
     summary.medicine = [];
     for (let i = 0; i < args.medicineDuration; i++) {
-      const d = new Date(`${baseDateStr}T00:00:00`);
+      const d = new Date(baseDate);
       d.setDate(d.getDate() + i);
       const dateStr = dateToString(d);
       const result = await processMedicineFiles({
@@ -1829,15 +1821,17 @@ async function main() {
   }
 
   if (args.autoReply) {
-    await processAutoReply({
-      token,
-      children,
-      date: getTaipeiDateString(),
-      telegramBotToken,
-      telegramChatId,
-      geminiApiKey,
-      debug: args.debug,
-    });
+    for (const date of dates) {
+      await processAutoReply({
+        token,
+        children,
+        date,
+        telegramBotToken,
+        telegramChatId,
+        geminiApiKey,
+        debug: args.debug,
+      });
+    }
   }
 
   const hasProblems =
