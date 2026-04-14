@@ -1,19 +1,19 @@
 # kids_care scraper
 
-自動抓取 [抱抱熊](https://www.holdinghands.com.tw) 托嬰聯絡簿，支援自動簽名、托藥單、Telegram／LINE 推播與 AI 回覆建議。
+自動抓取 [牽牽手](https://www.holdinghands.com.tw) 托嬰聯絡簿，支援自動簽名、托藥單、Telegram／LINE 推播與 AI 回覆建議。
 
 ## 需求
 
 - Node.js 20+
-- 抱抱熊家長帳號
+- 牽牽手家長帳號
 
 ---
 
 ## 安裝
 
 ```bash
-git clone <this-repo>
-cd kids_care
+git clone https://github.com/sean-taiwan/contact_book.git
+cd contact_book
 # 無需安裝任何 npm 套件，scraper.js 僅使用 Node.js 內建模組
 ```
 
@@ -24,7 +24,7 @@ cd kids_care
 在專案根目錄建立 `.env` 檔案：
 
 ```env
-# 必填：抱抱熊登入帳號
+# 必填：牽牽手登入帳號
 PHONE=0912345678
 PASSWORD=your_password
 
@@ -68,9 +68,6 @@ node scraper.js --notice --wait --auto_reply
 ```bash
 # 轉發老師未讀私訊到 Telegram
 node scraper.js --msg
-
-# 轉發所有聊天室的最後兩條訊息（不論已讀）
-node scraper.js --msg_all
 ```
 
 ### 托藥單
@@ -165,8 +162,8 @@ node scraper.js --del_med 1
 
 | Secret 名稱 | 說明 |
 |---|---|
-| `PHONE` | 抱抱熊登入手機號碼 |
-| `PASSWORD` | 抱抱熊登入密碼 |
+| `PHONE` | 牽牽手登入手機號碼 |
+| `PASSWORD` | 牽牽手登入密碼 |
 | `TG_BOT_TOKEN` | Telegram Bot Token |
 | `TG_CHAT_ID` | Telegram Chat ID |
 | `GEMINI_API_KEY` | Google Gemini API Key |
