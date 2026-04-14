@@ -1,0 +1,9 @@
+                                                   
+  4. Medium: medicine scheduling can shift dates by one day on hosts outside UTC, because it parses YYYY-MM-DD with new               
+     Date(baseDateStr) (/D:/Document and setting/Desktop/vibe_util/kids_care/scraper.js:1782, /D:/Document and setting/Desktop/       
+     vibe_util/kids_care/scraper.js:1786). In JavaScript, date-only strings are treated as UTC, while the rest of this script mostly  
+     uses local/Taipei-based date construction. That inconsistency can make multi-day --med --duration runs target the wrong calendar 
+     day.                                                                                                                             
+  5. Medium: --auto_reply silently ignores all but the first date in a requested range. expandDates() supports --from/--to, but the   
+     auto-reply path always passes only dates[0] into processAutoReply (/D:/Document and setting/Desktop/vibe_util/kids_care/         
+     scraper.js:1831). That is a behavioral mismatch: date ranges option should be rejected for --auto_reply

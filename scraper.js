@@ -33,7 +33,7 @@ function getHelpText() {
     "  --del_med 1|2            刪除指定孩子的所有托藥單：1=孩子1，2=孩子2",
     "  --notice                 抓取後發送 Telegram／LINE 通知，不寫入 ./Daily",
     "  --msg                    讀取老師未讀私訊並透過 Telegram 轉發",
-    "  --msg_debug              [偵錯用] 讀取所有聊天室的最後兩條訊息並轉發（不論已讀）",
+    "  --msg_debug              讀取所有聊天室的最後兩條訊息並轉發（不論已讀，僅供除錯用）",
     "  --auto_reply             擷取今日兩位孩子聯絡簿老師留言，請 Gemini 擬三段回覆後透過 Telegram 傳送",
     "  --no-sign-missing        不自動簽名聯絡簿",
     "  --wait                   等待至台北時間 18:00:01 再執行",
@@ -64,7 +64,6 @@ function parseArgs(argv) {
     telegramOnly: false,
     signMissing: true,
     fetchMessages: false,
-    fetchMessagesDebug: false,
     autoReply: false,
   };
 
@@ -96,7 +95,7 @@ function parseArgs(argv) {
       continue;
     }
     if (value === "--msg_debug") {
-      args.fetchMessagesDebug = true;
+      args.fetchMessagesAll = true; // 不過濾已讀，強制取每間聊天室最後兩則（除錯用）
       continue;
     }
     if (value === "--auto_reply") {
@@ -148,7 +147,7 @@ function parseArgs(argv) {
     throw new Error(`--from and --to must be used together\n\n${getHelpText()}`);
   }
   if (args.autoReply && (args.from || args.to)) {
-    throw new Error(`--auto_reply does not support date ranges; use --date or omit for today\n\n${getHelpText()}`);
+    throw new Error(`--auto_reply does not support date ranges, use --date instead\n\n${getHelpText()}`);
   }
 
   return args;
@@ -540,18 +539,25 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption) {
+async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption, authHeaders) {
   return withRetry(async () => {
-    // Image URLs are public; pass the URL directly to Telegram instead of downloading
-    const payload = await requestJson(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    // Download image with auth headers, then upload to Telegram as binary
+    const imgResponse = await fetch(imageUrl, { headers: authHeaders });
+    if (!imgResponse.ok) {
+      throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
+    }
+    const blob = await imgResponse.blob();
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    form.append("photo", blob, "photo.jpg");
+    if (caption) {
+      form.append("caption", caption);
+    }
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: "POST",
-      headers: { "content-type": "application/json;charset=UTF-8" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: imageUrl,
-        ...(caption ? { caption } : {}),
-      }),
+      body: form,
     });
+    const payload = await response.json();
     if (!payload.ok) {
       throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
     }
@@ -900,7 +906,7 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
         if (isImageContent(content)) {
           const imageUrl = buildImageUrl(content, msg.create_time);
           const caption = truncateTelegramCaption(`${header}\n${sender}`);
-          await sendTelegramPhotoFromUrl(telegramBotToken, telegramChatId, imageUrl, caption);
+          await sendTelegramPhotoFromUrl(telegramBotToken, telegramChatId, imageUrl, caption, authHeaders);
         } else {
           await sendTelegramMessage(telegramBotToken, telegramChatId, lineText);
         }
@@ -1777,7 +1783,7 @@ async function main() {
   if (args.medicineTarget) {
     const medChildren = filterChildrenForMedicine(children, args.medicineTarget);
     const baseDateStr = args.date ? dates[0] : getTomorrowString();
-    const baseDate = new Date(`${baseDateStr}T00:00:00`);
+    const baseDate = new Date(`${baseDateStr}T00:00:00`); // 用本地時間解析，避免 YYYY-MM-DD 被當 UTC 處理
     summary.medicine = [];
     for (let i = 0; i < args.medicineDuration; i++) {
       const d = new Date(baseDate);
@@ -1808,7 +1814,7 @@ async function main() {
     summary.medicine.push(...result);
   }
 
-  if (args.fetchMessages || args.fetchMessagesDebug) {
+  if (args.fetchMessages || args.fetchMessagesAll) {
     const msgsSent = await processMessages({
       token,
       user,
@@ -1818,7 +1824,7 @@ async function main() {
       lineAccessToken,
       lineUserId,
       debug: args.debug,
-      allMessages: args.fetchMessagesDebug,
+      allMessages: args.fetchMessagesAll,
     });
     if (args.debug) {
       process.stderr.write(`轉發訊息 ${msgsSent.length} 則。\n`);
