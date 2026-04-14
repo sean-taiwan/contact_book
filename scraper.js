@@ -538,15 +538,24 @@ async function sendTelegramMessage(botToken, chatId, text) {
 
 async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption) {
   return withRetry(async () => {
-    const payload = await requestJson(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    // Download image from public URL, then upload as binary
+    // (Telegram sendPhoto with URL only supports ports 80/443)
+    const imgResponse = await fetch(imageUrl);
+    if (!imgResponse.ok) {
+      throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
+    }
+    const blob = await imgResponse.blob();
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    form.append("photo", blob, "photo.jpg");
+    if (caption) {
+      form.append("caption", caption);
+    }
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: "POST",
-      headers: { "content-type": "application/json;charset=UTF-8" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: imageUrl,
-        ...(caption ? { caption } : {}),
-      }),
+      body: form,
     });
+    const payload = await response.json();
     if (!payload.ok) {
       throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
     }
@@ -1820,17 +1829,15 @@ async function main() {
   }
 
   if (args.autoReply) {
-    for (const date of dates) {
-      await processAutoReply({
-        token,
-        children,
-        date,
-        telegramBotToken,
-        telegramChatId,
-        geminiApiKey,
-        debug: args.debug,
-      });
-    }
+    await processAutoReply({
+      token,
+      children,
+      date: getTaipeiDateString(),
+      telegramBotToken,
+      telegramChatId,
+      geminiApiKey,
+      debug: args.debug,
+    });
   }
 
   const hasProblems =
