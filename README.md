@@ -149,6 +149,19 @@ node scraper.js --del_med 1
 
 ---
 
+## 取得 Google Gemini API Key
+
+`--auto_reply` 功能使用 Gemini API 擬回覆建議，需要 Google API Key。
+
+1. 前往 [Google AI Studio](https://aistudio.google.com/apikey)
+2. 登入 Google 帳號後，點擊 **Create API key**
+3. 選擇或建立一個 Google Cloud 專案
+4. 複製產生的 API Key（格式為 `AIzaSy...`），填入 `.env` 的 `GEMINI_API_KEY`
+
+> 免費額度通常足夠個人使用；若超量可在 [Google Cloud Console](https://console.cloud.google.com/) 設定用量上限。
+
+---
+
 ## GitHub Actions 自動排程
 
 `.github/workflows/scraper.yml` 已設定兩個排程：
