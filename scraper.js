@@ -536,25 +536,17 @@ async function sendTelegramMessage(botToken, chatId, text) {
   }
 }
 
-async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption, authHeaders) {
+async function sendTelegramPhotoFromUrl(botToken, chatId, imageUrl, caption) {
   return withRetry(async () => {
-    // Download image with auth headers, then upload to Telegram as binary
-    const imgResponse = await fetch(imageUrl, { headers: authHeaders });
-    if (!imgResponse.ok) {
-      throw new Error(`Failed to download image ${imageUrl}: ${imgResponse.status}`);
-    }
-    const blob = await imgResponse.blob();
-    const form = new FormData();
-    form.append("chat_id", chatId);
-    form.append("photo", blob, "photo.jpg");
-    if (caption) {
-      form.append("caption", caption);
-    }
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    const payload = await requestJson(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: "POST",
-      body: form,
+      headers: { "content-type": "application/json;charset=UTF-8" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: imageUrl,
+        ...(caption ? { caption } : {}),
+      }),
     });
-    const payload = await response.json();
     if (!payload.ok) {
       throw new Error(`Telegram sendPhoto failed: ${payload.description || JSON.stringify(payload)}`);
     }
@@ -903,7 +895,7 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
         if (isImageContent(content)) {
           const imageUrl = buildImageUrl(content, msg.create_time);
           const caption = truncateTelegramCaption(`${header}\n${sender}`);
-          await sendTelegramPhotoFromUrl(telegramBotToken, telegramChatId, imageUrl, caption, authHeaders);
+          await sendTelegramPhotoFromUrl(telegramBotToken, telegramChatId, imageUrl, caption);
         } else {
           await sendTelegramMessage(telegramBotToken, telegramChatId, lineText);
         }
@@ -1780,10 +1772,9 @@ async function main() {
   if (args.medicineTarget) {
     const medChildren = filterChildrenForMedicine(children, args.medicineTarget);
     const baseDateStr = args.date ? dates[0] : getTomorrowString();
-    const baseDate = new Date(baseDateStr);
     summary.medicine = [];
     for (let i = 0; i < args.medicineDuration; i++) {
-      const d = new Date(baseDate);
+      const d = new Date(`${baseDateStr}T00:00:00`);
       d.setDate(d.getDate() + i);
       const dateStr = dateToString(d);
       const result = await processMedicineFiles({
@@ -1829,15 +1820,17 @@ async function main() {
   }
 
   if (args.autoReply) {
-    await processAutoReply({
-      token,
-      children,
-      date: dates[0],
-      telegramBotToken,
-      telegramChatId,
-      geminiApiKey,
-      debug: args.debug,
-    });
+    for (const date of dates) {
+      await processAutoReply({
+        token,
+        children,
+        date,
+        telegramBotToken,
+        telegramChatId,
+        geminiApiKey,
+        debug: args.debug,
+      });
+    }
   }
 
   const hasProblems =
