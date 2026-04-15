@@ -245,14 +245,29 @@ async function loadConfig() {
   if (!phone || !password) {
     throw new Error("Expected PHONE or USERNAME and PASSWORD in .env");
   }
+
+  function parseTgAccount(suffix) {
+    const token = env[`TG_BOT_TOKEN${suffix}`] || "";
+    const chatId = env[`TG_CHAT_ID${suffix}`] || "";
+    if (!token || !chatId) return null;
+    const format = env[`TG_FORMAT${suffix}`] || "full";
+    return { token, chatId, format };
+  }
+
+  function parseLineAccount(suffix) {
+    const accessToken = env[`LINE_ACCESS_TOKEN${suffix}`] || "";
+    const userId = env[`LINE_USER_ID${suffix}`] || "";
+    if (!accessToken || !userId) return null;
+    const format = env[`LINE_FORMAT${suffix}`] || "compact";
+    return { accessToken, userId, format };
+  }
+
   return {
     phone,
     password,
-    telegramBotToken: env.TG_BOT_TOKEN || "",
-    telegramChatId: env.TG_CHAT_ID || "",
     geminiApiKey: env.GEMINI_API_KEY || "",
-    lineAccessToken: env.LINE_ACCESS_TOKEN || "",
-    lineUserId: env.LINE_USER_ID || "",
+    tgAccounts: [parseTgAccount(""), parseTgAccount("_2")].filter(Boolean),
+    lineAccounts: [parseLineAccount(""), parseLineAccount("_2")].filter(Boolean),
   };
 }
 
@@ -647,8 +662,12 @@ function toLineText(document) {
   return lines.join("\n").trimEnd();
 }
 
-async function sendDocumentToLine(accessToken, userId, document) {
-  const text = toLineText(document);
+function formatDocumentText(document, format) {
+  return format === "compact" ? toLineText(document) : toTelegramText(document);
+}
+
+async function sendDocumentToLine(accessToken, userId, document, format = "compact") {
+  const text = formatDocumentText(document, format);
   await sendLineMessage(accessToken, userId, text);
 }
 
@@ -705,7 +724,7 @@ async function callGeminiText(apiKey, prompt) {
   }, { label: "Gemini" });
 }
 
-async function processAutoReply({ token, children, date, telegramBotToken, telegramChatId, geminiApiKey, debug }) {
+async function processAutoReply({ token, children, date, tgAccounts, geminiApiKey, debug }) {
   const sections = [];
 
   for (const child of children) {
@@ -748,10 +767,12 @@ async function processAutoReply({ token, children, date, telegramBotToken, teleg
   const aiResponse = await callGeminiText(geminiApiKey, prompt);
   const versions = aiResponse.split("###").map((t) => t.trim()).filter(Boolean);
 
-  await sendTelegramMessage(telegramBotToken, telegramChatId, `📋 聯絡簿回覆建議（${date}）`);
-  for (const text of versions) {
-    for (const chunk of splitTelegramMessage(text)) {
-      await sendTelegramMessage(telegramBotToken, telegramChatId, chunk);
+  for (const acct of tgAccounts) {
+    await sendTelegramMessage(acct.token, acct.chatId, `📋 聯絡簿回覆建議（${date}）`);
+    for (const text of versions) {
+      for (const chunk of splitTelegramMessage(text)) {
+        await sendTelegramMessage(acct.token, acct.chatId, chunk);
+      }
     }
   }
 }
@@ -789,7 +810,7 @@ async function fetchMessagesByRoomId(token, roomId) {
   return Array.isArray(payload.messages) ? payload.messages : [];
 }
 
-async function processMessages({ token, user, children, telegramBotToken, telegramChatId, lineAccessToken, lineUserId, debug, allMessages = false }) {
+async function processMessages({ token, user, children, tgAccounts, lineAccounts, debug, allMessages = false }) {
   const rooms = await fetchMessageRooms(token);
 
   if (debug) {
@@ -901,34 +922,35 @@ async function processMessages({ token, user, children, telegramBotToken, telegr
       const lineText = `${header}\n${sender}${content ? `\n\n${content}` : ""}`;
 
       // TG
-      let tgOk = false;
-      try {
-        if (isImageContent(content)) {
-          const imageUrl = buildImageUrl(content, msg.create_time);
-          const caption = truncateTelegramCaption(`${header}\n${sender}`);
-          await sendTelegramPhotoFromUrl(telegramBotToken, telegramChatId, imageUrl, caption, authHeaders);
-        } else {
-          await sendTelegramMessage(telegramBotToken, telegramChatId, lineText);
-        }
-        tgOk = true;
-      } catch (err) {
-        process.stderr.write(`Telegram 轉發訊息 ${id} 失敗: ${err.message}\n`);
-      }
-
-      // LINE（文字訊息 + 圖片）
-      let lineOk = true; // LINE is optional; treat as ok when not configured
-      if (lineAccessToken && lineUserId) {
-        lineOk = false;
+      let tgOk = true;
+      for (const acct of tgAccounts) {
         try {
           if (isImageContent(content)) {
             const imageUrl = buildImageUrl(content, msg.create_time);
-            await sendLineImage(lineAccessToken, lineUserId, imageUrl, lineText);
+            const caption = truncateTelegramCaption(`${header}\n${sender}`);
+            await sendTelegramPhotoFromUrl(acct.token, acct.chatId, imageUrl, caption, authHeaders);
           } else {
-            await sendLineMessage(lineAccessToken, lineUserId, lineText);
+            await sendTelegramMessage(acct.token, acct.chatId, lineText);
           }
-          lineOk = true;
+        } catch (err) {
+          process.stderr.write(`Telegram 轉發訊息 ${id} 失敗: ${err.message}\n`);
+          tgOk = false;
+        }
+      }
+
+      // LINE（文字訊息 + 圖片）
+      let lineOk = true;
+      for (const acct of lineAccounts) {
+        try {
+          if (isImageContent(content)) {
+            const imageUrl = buildImageUrl(content, msg.create_time);
+            await sendLineImage(acct.accessToken, acct.userId, imageUrl, lineText);
+          } else {
+            await sendLineMessage(acct.accessToken, acct.userId, lineText);
+          }
         } catch (err) {
           process.stderr.write(`LINE 轉發訊息 ${id} 失敗: ${err.message}\n`);
+          lineOk = false;
         }
       }
 
@@ -1305,8 +1327,8 @@ async function maybeWriteDocument(outputDir, document, telegramOnly) {
   return writeDocument(outputDir, document);
 }
 
-async function sendDocumentToTelegram(botToken, chatId, document) {
-  const messages = splitTelegramMessage(toTelegramText(document));
+async function sendDocumentToTelegram(botToken, chatId, document, format = "full") {
+  const messages = splitTelegramMessage(formatDocumentText(document, format));
   for (const message of messages) {
     await sendTelegramMessage(botToken, chatId, message);
   }
@@ -1650,11 +1672,17 @@ async function main() {
   if (args.wait) {
     await waitUntilTaipei1800();
   }
-  const { phone, password, telegramBotToken, telegramChatId, geminiApiKey, lineAccessToken, lineUserId } = await loadConfig();
+  const { phone, password, geminiApiKey, tgAccounts, lineAccounts } = await loadConfig();
   const dates = expandDates(args);
   const outputDir = path.resolve(args.output);
 
-  if ((args.sendTelegram || args.fetchMessages || args.autoReply) && (!telegramBotToken || !telegramChatId)) {
+  if (args.sendTelegram && tgAccounts.length === 0 && lineAccounts.length === 0) {
+    throw new Error("Expected at least one TG or LINE account in .env");
+  }
+  if (args.fetchMessages && tgAccounts.length === 0 && lineAccounts.length === 0) {
+    throw new Error("Expected at least one TG or LINE account in .env");
+  }
+  if (args.autoReply && tgAccounts.length === 0) {
     throw new Error("Expected TG_BOT_TOKEN and TG_CHAT_ID in .env");
   }
   if (args.autoReply && !geminiApiKey) {
@@ -1707,17 +1735,19 @@ async function main() {
           const document = buildEmptyDocument(child, targetDate, sourceUrl);
           const written = await maybeWriteDocument(outputDir, document, args.telegramOnly);
           if (args.sendTelegram && document.exists) {
-            try {
-              await sendDocumentToTelegram(telegramBotToken, telegramChatId, document);
-            } catch (telegramError) {
-              await handleTelegramError(summary, telegramBotToken, telegramChatId, child.name, targetDate, telegramError);
+            for (const acct of tgAccounts) {
+              try {
+                await sendDocumentToTelegram(acct.token, acct.chatId, document, acct.format);
+              } catch (telegramError) {
+                await handleTelegramError(summary, acct.token, acct.chatId, child.name, targetDate, telegramError);
+              }
             }
-          }
-          if (args.sendTelegram && document.exists && lineAccessToken && lineUserId) {
-            try {
-              await sendDocumentToLine(lineAccessToken, lineUserId, document);
-            } catch (lineError) {
-              process.stderr.write(`LINE 發送失敗 (${child.name} ${targetDate}): ${lineError.message}\n`);
+            for (const acct of lineAccounts) {
+              try {
+                await sendDocumentToLine(acct.accessToken, acct.userId, document, acct.format);
+              } catch (lineError) {
+                process.stderr.write(`LINE 發送失敗 (${child.name} ${targetDate}): ${lineError.message}\n`);
+              }
             }
           }
           summary.files.push({
@@ -1752,17 +1782,19 @@ async function main() {
         const document = normalizeContactBook(child, targetDate, finalBook, sourceUrl, autoSigned);
         const written = await maybeWriteDocument(outputDir, document, args.telegramOnly);
         if (args.sendTelegram && document.exists) {
-          try {
-            await sendDocumentToTelegram(telegramBotToken, telegramChatId, document);
-          } catch (telegramError) {
-            await handleTelegramError(summary, telegramBotToken, telegramChatId, child.name, targetDate, telegramError);
+          for (const acct of tgAccounts) {
+            try {
+              await sendDocumentToTelegram(acct.token, acct.chatId, document, acct.format);
+            } catch (telegramError) {
+              await handleTelegramError(summary, acct.token, acct.chatId, child.name, targetDate, telegramError);
+            }
           }
-        }
-        if (args.sendTelegram && document.exists && lineAccessToken && lineUserId) {
-          try {
-            await sendDocumentToLine(lineAccessToken, lineUserId, document);
-          } catch (lineError) {
-            process.stderr.write(`LINE 發送失敗 (${child.name} ${targetDate}): ${lineError.message}\n`);
+          for (const acct of lineAccounts) {
+            try {
+              await sendDocumentToLine(acct.accessToken, acct.userId, document, acct.format);
+            } catch (lineError) {
+              process.stderr.write(`LINE 發送失敗 (${child.name} ${targetDate}): ${lineError.message}\n`);
+            }
           }
         }
         summary.files.push({
@@ -1819,10 +1851,8 @@ async function main() {
       token,
       user,
       children,
-      telegramBotToken,
-      telegramChatId,
-      lineAccessToken,
-      lineUserId,
+      tgAccounts,
+      lineAccounts,
       debug: args.debug,
       allMessages: args.fetchMessagesAll,
     });
@@ -1836,8 +1866,7 @@ async function main() {
       token,
       children,
       date: dates[0],
-      telegramBotToken,
-      telegramChatId,
+      tgAccounts,
       geminiApiKey,
       debug: args.debug,
     });

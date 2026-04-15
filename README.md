@@ -7,6 +7,8 @@
 - Node.js 20+
 - 牽牽手家長帳號
 
+> **注意：** 程式登入時會將同一帳號的手機 App 強制登出。建議由一位家長固定用手機回覆聯絡簿／訊息，另一位家長的帳號專門提供給程式使用。
+
 ---
 
 ## 安裝
@@ -28,17 +30,35 @@ cd contact_book
 PHONE=0912345678
 PASSWORD=your_password
 
-# 選填：Telegram 推播（--notice / --msg / --auto_reply 需要）
-TG_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TG_CHAT_ID=987654321
-
 # 選填：Gemini AI 回覆建議（--auto_reply 需要）
 GEMINI_API_KEY=AIzaSy...
 
-# 選填：LINE 推播（有設定才會發送）
+# 選填：Telegram 帳號 1（--notice / --msg / --auto_reply 需要）
+TG_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TG_CHAT_ID=987654321
+TG_FORMAT=full                  # full（完整）或 compact（精簡），預設 full
+
+# 選填：Telegram 帳號 2（留空則不發送）
+TG_BOT_TOKEN_2=
+TG_CHAT_ID_2=
+TG_FORMAT_2=full
+
+# 選填：LINE 帳號 1（有設定才會發送）
 LINE_ACCESS_TOKEN=xxxxxx...
 LINE_USER_ID=Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LINE_FORMAT=compact             # full（完整）或 compact（精簡），預設 compact
+
+# 選填：LINE 帳號 2（留空則不發送）
+LINE_ACCESS_TOKEN_2=
+LINE_USER_ID_2=
+LINE_FORMAT_2=compact
 ```
+
+> **通知格式說明：**
+> - `full`：完整格式，包含學校班級、老師的話、所有紀錄條目（目前 Telegram 預設）
+> - `compact`：精簡格式，只包含老師的話與需備物品（目前 LINE 預設）
+>
+> 每個帳號可獨立設定格式，例如將 LINE 設為 `full`、第二組 Telegram 設為 `compact`。
 
 ---
 
@@ -69,6 +89,8 @@ node scraper.js --notice --wait --auto_reply
 # 轉發老師未讀私訊到 Telegram
 node scraper.js --msg
 ```
+
+> **帳號需求：** `--msg` 至少需設定一個 TG 或 LINE 帳號；`--auto_reply` 則必須設定 TG 帳號（AI 回覆建議僅發送至 Telegram）。
 
 ### 托藥單
 
@@ -162,6 +184,17 @@ node scraper.js --del_med 1
 
 ---
 
+## 目前缺少的功能（歡迎協助）
+
+以下功能尚未實作，歡迎有興趣的開發者貢獻：
+
+- **透過 LINE 或 Telegram 直接回覆聯絡簿**
+- **透過 LINE 或 Telegram 直接回覆老師私訊**
+
+若有意願協助，歡迎開 Issue 或提交 Pull Request。
+
+---
+
 ## GitHub Actions 自動排程
 
 `.github/workflows/scraper.yml` 已設定兩個排程：
@@ -171,14 +204,24 @@ node scraper.js --del_med 1
 | 每小時 :42（台北時間 08:42–18:42） | `--msg`：轉發老師未讀私訊 |
 | 每天台北時間 16:42 | `--notice --wait --auto_reply`：推播聯絡簿 + AI 回覆建議 |
 
+> **16:42 排程說明：** GitHub Actions 實際執行時間通常延遲 30 分鐘至 1 小時，因此提前設定在 16:42 觸發，並搭配 `--wait` 讓程式等到台北時間 18:00:01 才真正執行，確保聯絡簿當天內容已更新。
+
 將以下 Secrets 設定在 GitHub Repo → **Settings → Secrets and variables → Actions**：
 
 | Secret 名稱 | 說明 |
 |---|---|
 | `PHONE` | 牽牽手登入手機號碼 |
 | `PASSWORD` | 牽牽手登入密碼 |
-| `TG_BOT_TOKEN` | Telegram Bot Token |
-| `TG_CHAT_ID` | Telegram Chat ID |
+| `TG_BOT_TOKEN` | Telegram Bot Token（帳號 1） |
+| `TG_CHAT_ID` | Telegram Chat ID（帳號 1） |
+| `TG_FORMAT` | Telegram 通知格式：`full` 或 `compact`（選填，預設 `full`） |
+| `TG_BOT_TOKEN_2` | Telegram Bot Token（帳號 2，選填） |
+| `TG_CHAT_ID_2` | Telegram Chat ID（帳號 2，選填） |
+| `TG_FORMAT_2` | Telegram 通知格式：帳號 2（選填，預設 `full`） |
 | `GEMINI_API_KEY` | Google Gemini API Key |
-| `LINE_ACCESS_TOKEN` | LINE Channel Access Token（選填） |
-| `LINE_USER_ID` | LINE User ID（選填） |
+| `LINE_ACCESS_TOKEN` | LINE Channel Access Token（帳號 1，選填） |
+| `LINE_USER_ID` | LINE User ID（帳號 1，選填） |
+| `LINE_FORMAT` | LINE 通知格式：`full` 或 `compact`（選填，預設 `compact`） |
+| `LINE_ACCESS_TOKEN_2` | LINE Channel Access Token（帳號 2，選填） |
+| `LINE_USER_ID_2` | LINE User ID（帳號 2，選填） |
+| `LINE_FORMAT_2` | LINE 通知格式：帳號 2（選填，預設 `compact`） |
